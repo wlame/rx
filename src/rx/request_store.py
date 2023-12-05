@@ -7,69 +7,18 @@ Note: This is an in-memory store. Data is lost when the process restarts.
 For persistent storage, a database backend would be needed.
 """
 
-from dataclasses import dataclass, field
 from datetime import datetime
 from threading import Lock
 from typing import Optional
 
-
-@dataclass
-class RequestInfo:
-    """Information about a trace request."""
-
-    request_id: str
-    paths: list[str]
-    patterns: list[str]
-    max_results: Optional[int]
-    started_at: datetime
-    completed_at: Optional[datetime] = None
-    total_matches: int = 0
-    total_files_scanned: int = 0
-    total_files_skipped: int = 0
-    total_time_ms: int = 0
-    hook_on_file_success: int = 0
-    hook_on_file_failed: int = 0
-    hook_on_match_success: int = 0
-    hook_on_match_failed: int = 0
-    hook_on_complete_success: int = 0
-    hook_on_complete_failed: int = 0
-
-    def to_dict(self) -> dict:
-        """Convert to dictionary for JSON serialization."""
-        return {
-            'request_id': self.request_id,
-            'paths': self.paths,
-            'patterns': self.patterns,
-            'max_results': self.max_results,
-            'started_at': self.started_at.isoformat() if self.started_at else None,
-            'completed_at': self.completed_at.isoformat() if self.completed_at else None,
-            'total_matches': self.total_matches,
-            'total_files_scanned': self.total_files_scanned,
-            'total_files_skipped': self.total_files_skipped,
-            'total_time_ms': self.total_time_ms,
-            'hooks': {
-                'on_file': {
-                    'success': self.hook_on_file_success,
-                    'failed': self.hook_on_file_failed,
-                },
-                'on_match': {
-                    'success': self.hook_on_match_success,
-                    'failed': self.hook_on_match_failed,
-                },
-                'on_complete': {
-                    'success': self.hook_on_complete_success,
-                    'failed': self.hook_on_complete_failed,
-                },
-            },
-        }
-
+from rx.models import RequestInfo
 
 # Thread-safe request store
 _requests: dict[str, RequestInfo] = {}
 _lock = Lock()
 
 # Maximum number of requests to keep in memory (to prevent memory leaks)
-MAX_STORED_REQUESTS = 10000
+MAX_STORED_REQUESTS = 100000
 
 
 def store_request(info: RequestInfo) -> None:
@@ -171,7 +120,7 @@ def list_requests(limit: int = 100, include_completed: bool = True) -> list[dict
     # Sort by started_at descending (most recent first)
     requests.sort(key=lambda r: r.started_at, reverse=True)
 
-    return [r.to_dict() for r in requests[:limit]]
+    return [r.model_dump(mode='json') for r in requests[:limit]]
 
 
 def clear_old_requests(max_age_seconds: int = 3600) -> int:

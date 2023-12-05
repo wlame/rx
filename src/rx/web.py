@@ -21,9 +21,6 @@ from rx.analyse import analyse_path, calculate_regex_complexity
 from rx.hooks import (
     DISABLE_CUSTOM_HOOKS,
     HookConfig,
-    build_file_scanned_payload,
-    build_match_found_payload,
-    build_trace_complete_payload,
     call_hook_async,
     generate_request_id,
     get_effective_hooks,
@@ -32,15 +29,19 @@ from rx.hooks import (
 from rx.models import (
     AnalyseResponse,
     ComplexityResponse,
+    FileScannedPayload,
     HealthResponse,
     Match,
+    MatchFoundPayload,
+    RequestInfo,
     SamplesResponse,
+    TraceCompletePayload,
     TraceResponse,
 )
 from rx.parse import get_context, get_context_by_lines, validate_file
-from rx.parse_json import HookCallbacks, parse_paths_json
+from rx.parse_json import HookCallbacks, parse_paths
 from rx.path_security import get_search_root, set_search_root, validate_path_within_root, validate_paths_within_root
-from rx.request_store import RequestInfo, increment_hook_counter, store_request, update_request
+from rx.request_store import increment_hook_counter, store_request, update_request
 
 # Replace the noop prometheus in parse module with real one
 parse_module.prom = prom
@@ -420,12 +421,12 @@ async def trace(
             request_id=req_id,
         )
 
-    # Parse files or directories with multiple patterns using JSON mode
+    # Parse files or directories with multiple patterns
     try:
         time_before = time()
         # Offload blocking I/O to thread pool to keep event loop responsive
         result = await anyio.to_thread.run_sync(
-            parse_paths_json,
+            parse_paths,
             path,
             regexp,
             max_results,
@@ -437,14 +438,14 @@ async def trace(
         parsing_time = time() - time_before
 
         # Calculate metrics
-        num_files = len(result['files'])
-        num_skipped = len(result['skipped_files'])
-        num_patterns = len(result['patterns'])
-        num_matches = len(result['matches'])
+        num_files = len(result.files)
+        num_skipped = len(result.skipped_files)
+        num_patterns = len(result.patterns)
+        num_matches = len(result.matches)
 
         # Calculate total bytes processed
         total_bytes = 0
-        for filepath in result['files'].values():
+        for filepath in result.files.values():
             if os.path.exists(filepath):
                 file_size = os.path.getsize(filepath)
                 total_bytes += file_size
@@ -505,12 +506,12 @@ async def trace(
         request_id=req_id,
         path=path,  # Pass as list directly
         time=parsing_time,
-        patterns=result['patterns'],
-        files=result['files'],
-        matches=[Match(**m) for m in result['matches']],
-        scanned_files=result['scanned_files'],
-        skipped_files=result['skipped_files'],
-        file_chunks=result.get('file_chunks'),
+        patterns=result.patterns,
+        files=result.files,
+        matches=[Match(**m) for m in result.matches],
+        scanned_files=result.scanned_files,
+        skipped_files=result.skipped_files,
+        file_chunks=result.file_chunks,
         max_results=max_results,  # Include max_results in response
     )
 

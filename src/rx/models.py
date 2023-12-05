@@ -1,9 +1,10 @@
 """Pydantic models for API requests and responses"""
 
 import re
+from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 
 class HealthResponse(BaseModel):
@@ -41,6 +42,51 @@ class HealthResponse(BaseModel):
     )
 
 
+class RequestInfo(BaseModel):
+    """Information about a trace request for monitoring and tracking."""
+
+    model_config = ConfigDict(
+        # Allow attribute assignment after creation (needed for increment_hook_counter)
+        validate_assignment=True
+    )
+
+    request_id: str = Field(..., description="Unique identifier for the trace request")
+    paths: list[str] = Field(..., description="Paths that were searched")
+    patterns: list[str] = Field(..., description="Regex patterns used")
+    max_results: int | None = Field(None, description="Maximum number of results requested")
+    started_at: datetime = Field(..., description="When the request started")
+    completed_at: datetime | None = Field(None, description="When the request completed")
+    total_matches: int = Field(default=0, description="Total number of matches found")
+    total_files_scanned: int = Field(default=0, description="Total number of files scanned")
+    total_files_skipped: int = Field(default=0, description="Total number of files skipped")
+    total_time_ms: int = Field(default=0, description="Total processing time in milliseconds")
+    hook_on_file_success: int = Field(default=0, description="Successful on_file hook calls")
+    hook_on_file_failed: int = Field(default=0, description="Failed on_file hook calls")
+    hook_on_match_success: int = Field(default=0, description="Successful on_match hook calls")
+    hook_on_match_failed: int = Field(default=0, description="Failed on_match hook calls")
+    hook_on_complete_success: int = Field(default=0, description="Successful on_complete hook calls")
+    hook_on_complete_failed: int = Field(default=0, description="Failed on_complete hook calls")
+
+    @computed_field
+    @property
+    def hooks(self) -> dict:
+        """Computed field that returns hook statistics in nested structure."""
+        return {
+            'on_file': {
+                'success': self.hook_on_file_success,
+                'failed': self.hook_on_file_failed,
+            },
+            'on_match': {
+                'success': self.hook_on_match_success,
+                'failed': self.hook_on_match_failed,
+            },
+            'on_complete': {
+                'success': self.hook_on_complete_success,
+                'failed': self.hook_on_complete_failed,
+            },
+        }
+
+
 class Submatch(BaseModel):
     """A submatch within a matched line
 
@@ -53,6 +99,37 @@ class Submatch(BaseModel):
     text: str = Field(..., example="error", description="The matched text")
     start: int = Field(..., example=10, description="Start position in line (bytes)")
     end: int = Field(..., example=15, description="End position in line (bytes)")
+
+
+class ParseResult(BaseModel):
+    """Result from parsing files for regex patterns
+
+    This is the internal result structure returned by parse_paths() before
+    being converted to API response formats.
+
+    Attributes:
+        patterns: Mapping of pattern IDs to pattern strings (e.g., {"p1": "error", "p2": "warning"})
+        files: Mapping of file IDs to file paths (e.g., {"f1": "/path/file.log"})
+        matches: List of match dictionaries with pattern_id, file_id, offset, line info
+        scanned_files: List of all files that were scanned (for directory scans)
+        skipped_files: List of files that were skipped (binary, inaccessible, etc.)
+        file_chunks: Mapping of file IDs to number of chunks processed
+        context_lines: Mapping of composite keys to context line lists (e.g., "p1:f1:100" -> [ContextLine, ...])
+        before_context: Number of context lines before matches
+        after_context: Number of context lines after matches
+    """
+
+    patterns: dict[str, str] = Field(default_factory=dict, description="Pattern ID to pattern string mapping")
+    files: dict[str, str] = Field(default_factory=dict, description="File ID to filepath mapping")
+    matches: list[dict[str, Any]] = Field(default_factory=list, description="List of match dictionaries")
+    scanned_files: list[str] = Field(default_factory=list, description="Files that were scanned")
+    skipped_files: list[str] = Field(default_factory=list, description="Files that were skipped")
+    file_chunks: dict[str, int] = Field(default_factory=dict, description="File ID to chunk count mapping")
+    context_lines: dict[str, list["ContextLine"]] = Field(
+        default_factory=dict, description="Context lines by composite key"
+    )
+    before_context: int = Field(default=0, description="Number of lines before matches")
+    after_context: int = Field(default=0, description="Number of lines after matches")
 
 
 class ContextLine(BaseModel):
@@ -652,3 +729,50 @@ class SamplesResponse(BaseModel):
                     output_lines.append("")
 
         return "\n".join(output_lines)
+
+
+# Hook Payload Models
+
+
+class FileScannedPayload(BaseModel):
+    """Payload for on_file_scanned hook event.
+
+    Sent when a file scan is completed during trace operation.
+    """
+
+    event: str = Field(default="file_scanned", description="Event type identifier")
+    request_id: str = Field(..., description="Unique identifier for the trace request")
+    file_path: str = Field(..., description="Path to the scanned file")
+    file_size_bytes: int = Field(..., description="Size of the file in bytes")
+    scan_time_ms: int = Field(..., description="Time taken to scan the file in milliseconds")
+    matches_count: int = Field(..., description="Number of matches found in this file")
+
+
+class MatchFoundPayload(BaseModel):
+    """Payload for on_match_found hook event.
+
+    Sent for each individual match found during trace operation.
+    """
+
+    event: str = Field(default="match_found", description="Event type identifier")
+    request_id: str = Field(..., description="Unique identifier for the trace request")
+    file_path: str = Field(..., description="Path to the file containing the match")
+    pattern: str = Field(..., description="Regex pattern that was matched")
+    offset: int = Field(..., description="Byte offset of the match in the file")
+    line_number: int | None = Field(default=None, description="Line number of the match (1-based, optional)")
+
+
+class TraceCompletePayload(BaseModel):
+    """Payload for on_trace_complete hook event.
+
+    Sent when the entire trace request completes.
+    """
+
+    event: str = Field(default="trace_complete", description="Event type identifier")
+    request_id: str = Field(..., description="Unique identifier for the trace request")
+    paths: str = Field(..., description="Comma-separated list of paths that were traced")
+    patterns: str = Field(..., description="Comma-separated list of regex patterns used")
+    total_files_scanned: int = Field(..., description="Total number of files scanned")
+    total_files_skipped: int = Field(..., description="Total number of files skipped")
+    total_matches: int = Field(..., description="Total number of matches found")
+    total_time_ms: int = Field(..., description="Total time taken for the trace in milliseconds")

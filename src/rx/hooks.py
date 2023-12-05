@@ -17,11 +17,11 @@ Security Warning:
 import logging
 import os
 import uuid
-from dataclasses import dataclass
 from time import time
 from typing import Optional
 
 import httpx
+from pydantic import BaseModel, HttpUrl
 
 from rx.cli import prometheus as prom
 
@@ -39,13 +39,12 @@ DISABLE_CUSTOM_HOOKS = os.getenv('RX_DISABLE_CUSTOM_HOOKS', '').lower() in ('tru
 HOOK_TIMEOUT_SECONDS = 3.0
 
 
-@dataclass
-class HookConfig:
-    """Configuration for hook URLs."""
+class HookConfig(BaseModel):
+    """Configuration for hook URLs with validation."""
 
-    on_file_url: Optional[str] = None
-    on_match_url: Optional[str] = None
-    on_complete_url: Optional[str] = None
+    on_file_url: HttpUrl | str | None = None
+    on_match_url: HttpUrl | str | None = None
+    on_complete_url: HttpUrl | str | None = None
 
     def has_any_hook(self) -> bool:
         """Check if any hook is configured."""
@@ -201,66 +200,3 @@ async def call_hook_async(url: str, payload: dict, event_type: str) -> bool:
         logger.warning(f"Hook call to {url} failed: {e} (request_id={request_id})")
         prom.record_hook_call(event_type, False, duration)
         return False
-
-
-# Payload builders for each event type
-
-
-def build_file_scanned_payload(
-    request_id: str,
-    file_path: str,
-    file_size_bytes: int,
-    scan_time_ms: int,
-    matches_count: int,
-) -> dict:
-    """Build payload for on_file_scanned event."""
-    return {
-        'event': 'file_scanned',
-        'request_id': request_id,
-        'file_path': file_path,
-        'file_size_bytes': file_size_bytes,
-        'scan_time_ms': scan_time_ms,
-        'matches_count': matches_count,
-    }
-
-
-def build_match_found_payload(
-    request_id: str,
-    file_path: str,
-    pattern: str,
-    offset: int,
-    line_number: Optional[int] = None,
-) -> dict:
-    """Build payload for on_match_found event."""
-    payload = {
-        'event': 'match_found',
-        'request_id': request_id,
-        'file_path': file_path,
-        'pattern': pattern,
-        'offset': offset,
-    }
-    if line_number is not None:
-        payload['line_number'] = line_number
-    return payload
-
-
-def build_trace_complete_payload(
-    request_id: str,
-    paths: list[str],
-    patterns: list[str],
-    total_files_scanned: int,
-    total_files_skipped: int,
-    total_matches: int,
-    total_time_ms: int,
-) -> dict:
-    """Build payload for on_trace_complete event."""
-    return {
-        'event': 'trace_complete',
-        'request_id': request_id,
-        'paths': ','.join(paths),  # Join for query param
-        'patterns': ','.join(patterns),  # Join for query param
-        'total_files_scanned': total_files_scanned,
-        'total_files_skipped': total_files_skipped,
-        'total_matches': total_matches,
-        'total_time_ms': total_time_ms,
-    }

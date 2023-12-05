@@ -413,11 +413,12 @@ wheels = [
 
 [[package]]
 name = "rx-tool"
-version = "1.0.0"
+version = "1.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "prometheus-client" },
     { name = "psutil" },
     { name = "sh" },
@@ -439,6 +440,7 @@ dev = [
 requires-dist = [
     { name = "click", specifier = ">=8.1.0" },
     { name = "fastapi", specifier = ">=0.118.0" },
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "prometheus-client", specifier = ">=0.21.0" },
     { name = "psutil", specifier = ">=7.1.2" },
     { name = "sh", specifier = ">=2.2.2" },

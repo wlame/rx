@@ -10,16 +10,13 @@ from time import time
 import click
 
 from rx.hooks import (
-    build_file_scanned_payload,
-    build_match_found_payload,
-    build_trace_complete_payload,
     call_hook_sync,
     generate_request_id,
     get_effective_hooks,
 )
-from rx.models import ContextLine, Match, TraceResponse
-from rx.parse_json import HookCallbacks, parse_paths_json
-from rx.request_store import RequestInfo, increment_hook_counter, store_request, update_request
+from rx.models import ContextLine, Match, ParseResult, RequestInfo, TraceCompletePayload, TraceResponse
+from rx.parse_json import HookCallbacks, parse_paths
+from rx.request_store import increment_hook_counter, store_request, update_request
 
 
 def format_context_header(file_val: str, offset_str: str, pattern_val: str, colorize: bool) -> str:
@@ -392,10 +389,10 @@ def trace_command(
                 request_id=req_id,
             )
 
-        # Parse files or directories for matches using JSON mode
+        # Parse files or directories for matches
         try:
             time_before = time()
-            result = parse_paths_json(
+            parse_result: ParseResult = parse_paths(
                 final_paths,
                 final_regexps,
                 max_results=max_results,
@@ -406,36 +403,27 @@ def trace_command(
             )
             parsing_time = time() - time_before
 
-            # Extract data from ID-based result structure
-            pattern_ids = result['patterns']  # {'p1': 'error', 'p2': 'warning'}
-            file_ids = result['files']  # {'f1': '/path/file.log'}
-            matches = result['matches']  # [{'pattern': 'p1', 'file': 'f1', 'offset': 100, ...}]
-            scanned_files = result['scanned_files']
-            skipped_files = result['skipped_files']
-            context_lines_dict = result.get('context_lines')  # Optional context from ripgrep
-            file_chunks = result.get('file_chunks')  # Number of chunks per file
-
             # Update request info with results
             update_request(
                 req_id,
                 completed_at=datetime.now(),
-                total_matches=len(matches),
-                total_files_scanned=len(file_ids),
-                total_files_skipped=len(skipped_files),
+                total_matches=len(parse_result.matches),
+                total_files_scanned=len(parse_result.files),
+                total_files_skipped=len(parse_result.skipped_files),
                 total_time_ms=int(parsing_time * 1000),
             )
 
             # Call on_complete hook if configured
             if hooks_config.on_complete_url:
-                complete_payload = build_trace_complete_payload(
+                complete_payload: dict = TraceCompletePayload(
                     request_id=req_id,
-                    paths=final_paths,
-                    patterns=final_regexps,
-                    total_files_scanned=len(file_ids),
-                    total_files_skipped=len(skipped_files),
-                    total_matches=len(matches),
+                    paths=','.join(final_paths),
+                    patterns=','.join(final_regexps),
+                    total_files_scanned=len(parse_result.files),
+                    total_files_skipped=len(parse_result.skipped_files),
+                    total_matches=len(parse_result.matches),
                     total_time_ms=int(parsing_time * 1000),
-                )
+                ).model_dump()
                 success = call_hook_sync(hooks_config.on_complete_url, complete_payload, 'on_complete')
                 increment_hook_counter(req_id, 'on_complete', success)
 
@@ -452,9 +440,9 @@ def trace_command(
         # Build response object
         # Convert context_lines to proper format if present
         converted_context = None
-        if context_lines_dict:
+        if parse_result.context_lines:
             converted_context = {}
-            for key, ctx_lines in context_lines_dict.items():
+            for key, ctx_lines in parse_result.context_lines.items():
                 # Convert ContextLine objects to dict for serialization
                 converted_context[key] = ctx_lines
 
@@ -462,12 +450,12 @@ def trace_command(
             request_id=req_id,
             path=final_paths,  # Pass as list directly
             time=parsing_time,
-            patterns=pattern_ids,
-            files=file_ids,
-            matches=[Match(**m) for m in matches],
-            scanned_files=scanned_files,
-            skipped_files=skipped_files,
-            file_chunks=file_chunks,
+            patterns=parse_result.patterns,
+            files=parse_result.files,
+            matches=[Match(**m) for m in parse_result.matches],
+            scanned_files=parse_result.scanned_files,
+            skipped_files=parse_result.skipped_files,
+            file_chunks=parse_result.file_chunks,
             context_lines=converted_context,
             before_context=before_ctx if samples else None,
             after_context=after_ctx if samples else None,
@@ -476,7 +464,15 @@ def trace_command(
 
         # Handle --samples flag
         if samples:
-            handle_samples_output(response, pattern_ids, file_ids, before_ctx, after_ctx, output_json, no_color)
+            handle_samples_output(
+                response=response,
+                pattern_ids=parse_result.patterns,
+                file_ids=parse_result.files,
+                before_ctx=before_ctx,
+                after_ctx=after_ctx,
+                output_json=output_json,
+                no_color=no_color,
+            )
         else:
             # No samples - just show matches
             if output_json:

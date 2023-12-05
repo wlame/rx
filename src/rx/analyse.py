@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from time import time
-from typing import Any, Callable
+from typing import Any
 
 from rx.index import (
     create_index_file,
@@ -19,7 +19,6 @@ from rx.index import (
 )
 from rx.parse import is_text_file
 from rx.regex import calculate_regex_complexity
-from rx.utils import NEWLINE_SYMBOL
 
 logger = logging.getLogger(__name__)
 
@@ -48,8 +47,12 @@ def human_readable_size(size_bytes: int) -> str:
 
 
 @dataclass
-class FileAnalysisResult:
-    """Result of analyzing a single file."""
+class FileAnalysisState:
+    """Internal state for analyzing a single file.
+
+    This is used during the analysis process and contains internal identifiers.
+    For API responses, use the Pydantic FileAnalysisResult model from rx.models.
+    """
 
     file_id: str
     filepath: str
@@ -108,7 +111,7 @@ class FileAnalyzer:
         """
         self.use_index_cache = use_index_cache
 
-    def file_hook(self, filepath: str, result: FileAnalysisResult) -> None:
+    def file_hook(self, filepath: str, result: FileAnalysisState) -> None:
         """
         Hook that processes file metadata.
 
@@ -116,11 +119,11 @@ class FileAnalyzer:
 
         Args:
             filepath: Path to the file being analyzed
-            result: FileAnalysisResult object to update with custom metrics
+            result: FileAnalysisState object to update with custom metrics
         """
         pass
 
-    def line_hook(self, line: str, line_num: int, result: FileAnalysisResult) -> None:
+    def line_hook(self, line: str, line_num: int, result: FileAnalysisState) -> None:
         """
         Hook that processes each line.
 
@@ -129,22 +132,22 @@ class FileAnalyzer:
         Args:
             line: The current line content
             line_num: The line number (1-indexed)
-            result: FileAnalysisResult object to update with custom metrics
+            result: FileAnalysisState object to update with custom metrics
         """
         pass
 
-    def post_hook(self, result: FileAnalysisResult) -> None:
+    def post_hook(self, result: FileAnalysisState) -> None:
         """
         Hook that runs after file processing.
 
         Override this method to add custom post-processing analysis.
 
         Args:
-            result: FileAnalysisResult object to update with custom metrics
+            result: FileAnalysisState object to update with custom metrics
         """
         pass
 
-    def _try_load_from_cache(self, filepath: str, file_id: str) -> FileAnalysisResult | None:
+    def _try_load_from_cache(self, filepath: str, file_id: str) -> FileAnalysisState | None:
         """Try to load analysis results from cached index.
 
         Args:
@@ -152,7 +155,7 @@ class FileAnalyzer:
             file_id: File ID for the result
 
         Returns:
-            FileAnalysisResult if valid cache exists, None otherwise
+            FileAnalysisState if valid cache exists, None otherwise
         """
         if not self.use_index_cache:
             return None
@@ -173,7 +176,7 @@ class FileAnalyzer:
         try:
             stat_info = os.stat(filepath)
 
-            result = FileAnalysisResult(
+            result = FileAnalysisState(
                 file_id=file_id,
                 filepath=filepath,
                 size_bytes=index_data.get("source_size_bytes", stat_info.st_size),
@@ -212,7 +215,7 @@ class FileAnalyzer:
             logger.debug(f"Failed to load from cache for {filepath}: {e}")
             return None
 
-    def analyze_file(self, filepath: str, file_id: str) -> FileAnalysisResult:
+    def analyze_file(self, filepath: str, file_id: str) -> FileAnalysisState:
         """Analyze a single file with all registered hooks.
 
         For large text files with valid cached indexes, analysis data is
@@ -237,7 +240,7 @@ class FileAnalyzer:
             size_bytes = stat_info.st_size
 
             # Initialize result
-            result = FileAnalysisResult(
+            result = FileAnalysisState(
                 file_id=file_id,
                 filepath=filepath,
                 size_bytes=size_bytes,
@@ -282,7 +285,7 @@ class FileAnalyzer:
         except Exception as e:
             logger.error(f"Failed to analyze {filepath}: {e}")
             # Return minimal result for failed files
-            return FileAnalysisResult(
+            return FileAnalysisState(
                 file_id=file_id,
                 filepath=filepath,
                 size_bytes=0,
@@ -290,7 +293,7 @@ class FileAnalyzer:
                 is_text=False,
             )
 
-    def _create_index_for_result(self, filepath: str, result: FileAnalysisResult):
+    def _create_index_for_result(self, filepath: str, result: FileAnalysisState):
         """Create an index file from analysis result.
 
         This is called after analyzing large files to cache the results.
@@ -302,7 +305,7 @@ class FileAnalyzer:
         except Exception as e:
             logger.warning(f"Failed to create index for {filepath}: {e}")
 
-    def _analyze_text_file(self, filepath: str, result: FileAnalysisResult):
+    def _analyze_text_file(self, filepath: str, result: FileAnalysisState):
         """Analyze text file content using streaming to avoid loading entire file in memory."""
         try:
             # Sample first chunk for line ending detection (up to 10MB)
@@ -554,4 +557,4 @@ def analyse_path(paths: list[str], max_workers: int = 10) -> dict[str, Any]:
 
 
 # Re-export calculate_regex_complexity for backward compatibility
-__all__ = ['analyse_path', 'calculate_regex_complexity', 'FileAnalyzer', 'FileAnalysisResult']
+__all__ = ['analyse_path', 'calculate_regex_complexity', 'FileAnalyzer', 'FileAnalysisState']

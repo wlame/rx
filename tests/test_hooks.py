@@ -9,14 +9,12 @@ import pytest
 from rx.hooks import (
     HOOK_TIMEOUT_SECONDS,
     HookConfig,
-    build_file_scanned_payload,
-    build_match_found_payload,
-    build_trace_complete_payload,
     call_hook_sync,
     generate_request_id,
     get_effective_hooks,
     get_hook_env_config,
 )
+from rx.models import FileScannedPayload, MatchFoundPayload, TraceCompletePayload
 from rx.parse_json import HookCallbacks
 from rx.request_store import (
     RequestInfo,
@@ -128,17 +126,18 @@ class TestGenerateRequestId:
 
 
 class TestBuildPayloads:
-    """Tests for payload builder functions."""
+    """Tests for payload Pydantic models."""
 
     def test_build_file_scanned_payload(self):
         """Test building file scanned payload."""
-        payload = build_file_scanned_payload(
+        payload_model = FileScannedPayload(
             request_id="test-123",
             file_path="/var/log/app.log",
             file_size_bytes=1024,
             scan_time_ms=100,
             matches_count=5,
         )
+        payload = payload_model.model_dump()
         assert payload['event'] == 'file_scanned'
         assert payload['request_id'] == 'test-123'
         assert payload['file_path'] == '/var/log/app.log'
@@ -148,13 +147,14 @@ class TestBuildPayloads:
 
     def test_build_match_found_payload(self):
         """Test building match found payload."""
-        payload = build_match_found_payload(
+        payload_model = MatchFoundPayload(
             request_id="test-123",
             file_path="/var/log/app.log",
             pattern="error.*",
             offset=500,
             line_number=42,
         )
+        payload = payload_model.model_dump()
         assert payload['event'] == 'match_found'
         assert payload['request_id'] == 'test-123'
         assert payload['file_path'] == '/var/log/app.log'
@@ -164,25 +164,27 @@ class TestBuildPayloads:
 
     def test_build_match_found_payload_without_line_number(self):
         """Test building match found payload without line number."""
-        payload = build_match_found_payload(
+        payload_model = MatchFoundPayload(
             request_id="test-123",
             file_path="/var/log/app.log",
             pattern="error.*",
             offset=500,
         )
-        assert 'line_number' not in payload
+        payload = payload_model.model_dump()
+        assert payload['line_number'] is None
 
     def test_build_trace_complete_payload(self):
         """Test building trace complete payload."""
-        payload = build_trace_complete_payload(
+        payload_model = TraceCompletePayload(
             request_id="test-123",
-            paths=["/var/log/app.log", "/var/log/error.log"],
-            patterns=["error.*", "warning.*"],
+            paths='/var/log/app.log,/var/log/error.log',
+            patterns='error.*,warning.*',
             total_files_scanned=2,
             total_files_skipped=1,
             total_matches=10,
             total_time_ms=500,
         )
+        payload = payload_model.model_dump()
         assert payload['event'] == 'trace_complete'
         assert payload['request_id'] == 'test-123'
         assert payload['paths'] == '/var/log/app.log,/var/log/error.log'
@@ -395,7 +397,7 @@ class TestRequestStore:
             hook_on_file_failed=1,
         )
 
-        data = info.to_dict()
+        data = info.model_dump(mode='json')
         assert data['request_id'] == 'test-123'
         assert data['total_matches'] == 50
         assert data['hooks']['on_file']['success'] == 5

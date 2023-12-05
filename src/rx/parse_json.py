@@ -1,7 +1,7 @@
-"""New JSON-based parsing implementation using ripgrep --json mode
+"""File parsing implementation using ripgrep
 
-This module provides the new implementation of file parsing that uses
-ripgrep's --json output format for richer match data and context extraction.
+This module provides file parsing functionality that uses ripgrep's --json
+output format for richer match data and context extraction.
 """
 
 import logging
@@ -15,7 +15,7 @@ from datetime import datetime
 from typing import Callable, Optional
 
 from rx.cli import prometheus as prom
-from rx.models import ContextLine, Submatch
+from rx.models import ContextLine, FileScannedPayload, MatchFoundPayload, ParseResult, Submatch
 from rx.parse import MAX_SUBPROCESSES, FileTask, create_file_tasks, scan_directory_for_text_files, validate_file
 from rx.rg_json import RgContextEvent, RgMatchEvent, parse_rg_json_event
 from rx.utils import NEWLINE_SYMBOL
@@ -102,7 +102,7 @@ def identify_matching_patterns(
     return matching_pattern_ids
 
 
-def process_task_worker_json(
+def process_task_worker(
     task: FileTask,
     pattern_ids: dict[str, str],
     rg_extra_args: list | None = None,
@@ -110,7 +110,7 @@ def process_task_worker_json(
     context_after: int = 0,
 ) -> tuple[FileTask, list[dict], list[ContextLine], float]:
     """
-    Worker function to process a single FileTask with multiple patterns using ripgrep --json.
+    Worker function to process a single FileTask with multiple patterns using ripgrep.
     Runs dd | rg --json pipeline and returns rich match data with optional context.
 
     Args:
@@ -350,7 +350,7 @@ def process_task_worker_json(
         return (task, [], [], elapsed)
 
 
-def parse_multiple_files_multipattern_json(
+def parse_multiple_files_multipattern(
     filepaths: list[str],
     pattern_ids: dict[str, str],
     file_ids: dict[str, str],
@@ -361,7 +361,7 @@ def parse_multiple_files_multipattern_json(
     hooks: Optional[HookCallbacks] = None,
 ) -> tuple[list[dict], dict[str, list[ContextLine]], dict[str, int]]:
     """
-    Parse multiple files with multiple patterns using JSON mode and return rich match data.
+    Parse multiple files with multiple patterns and return rich match data.
 
     Args:
         filepaths: List of file paths
@@ -441,11 +441,9 @@ def parse_multiple_files_multipattern_json(
             'tasks_total': file_chunk_counts.get(file_id, 1),
         }
 
-    with ThreadPoolExecutor(max_workers=MAX_SUBPROCESSES, thread_name_prefix="WorkerJSON") as executor:
+    with ThreadPoolExecutor(max_workers=MAX_SUBPROCESSES, thread_name_prefix="Worker") as executor:
         future_to_task = {
-            executor.submit(
-                process_task_worker_json, task, pattern_ids, rg_extra_args, context_before, context_after
-            ): task
+            executor.submit(process_task_worker, task, pattern_ids, rg_extra_args, context_before, context_after): task
             for task in all_tasks
         }
 
@@ -486,17 +484,16 @@ def parse_multiple_files_multipattern_json(
                         # Call on_match_found hook if configured
                         if hooks and hooks.on_match_found:
                             try:
-                                hooks.on_match_found(
-                                    {
-                                        'request_id': hooks.request_id,
-                                        'file_path': file_stats[file_id]['filepath']
-                                        if file_id in file_stats
-                                        else task.filepath,
-                                        'pattern': pattern_ids.get(matching_pattern_id, matching_pattern_id),
-                                        'offset': match_dict['offset'],
-                                        'line_number': match_dict['line_number'],
-                                    }
-                                )
+                                payload: dict = MatchFoundPayload(
+                                    request_id=hooks.request_id,
+                                    file_path=file_stats[file_id]['filepath']
+                                    if file_id in file_stats
+                                    else task.filepath,
+                                    pattern=pattern_ids.get(matching_pattern_id, matching_pattern_id),
+                                    offset=match_dict['offset'],
+                                    line_number=match_dict['line_number'],
+                                ).model_dump()
+                                hooks.on_match_found(payload)
                             except Exception as e:
                                 logger.warning(f"[PARSE_JSON] on_match_found hook failed: {e}")
 
@@ -517,15 +514,14 @@ def parse_multiple_files_multipattern_json(
                         if hooks and hooks.on_file_scanned:
                             scan_time_ms = int((time.time() - stats['start_time']) * 1000)
                             try:
-                                hooks.on_file_scanned(
-                                    {
-                                        'request_id': hooks.request_id,
-                                        'file_path': stats['filepath'],
-                                        'file_size_bytes': stats['file_size'],
-                                        'scan_time_ms': scan_time_ms,
-                                        'matches_count': stats['matches_count'],
-                                    }
-                                )
+                                payload = FileScannedPayload(
+                                    request_id=hooks.request_id,
+                                    file_path=stats['filepath'],
+                                    file_size_bytes=stats['file_size'],
+                                    scan_time_ms=scan_time_ms,
+                                    matches_count=stats['matches_count'],
+                                ).model_dump()
+                                hooks.on_file_scanned(payload)
                             except Exception as e:
                                 logger.warning(f"[PARSE_JSON] on_file_scanned hook failed: {e}")
 
@@ -621,7 +617,7 @@ def parse_multiple_files_multipattern_json(
     return matches, context_dict, file_chunk_counts
 
 
-def parse_paths_json(
+def parse_paths(
     paths: list[str],
     regexps: list[str],
     max_results: int | None = None,
@@ -629,9 +625,9 @@ def parse_paths_json(
     context_before: int = 0,
     context_after: int = 0,
     hooks: Optional[HookCallbacks] = None,
-) -> dict:
+) -> ParseResult:
     """
-    Parse files or directories for multiple regex patterns using JSON mode.
+    Parse files or directories for multiple regex patterns.
     Returns ID-based structure with rich match data and optional context.
 
     Args:
@@ -686,16 +682,17 @@ def parse_paths_json(
 
     if not all_files_to_parse:
         logger.warning(f"[PARSE_JSON] No valid files found across all paths")
-        return {
-            "patterns": pattern_ids,
-            "files": {},
-            "matches": [],
-            "scanned_files": [],
-            "skipped_files": all_skipped_files,
-            "context_lines": {},
-            "before_context": context_before,
-            "after_context": context_after,
-        }
+        return ParseResult(
+            patterns=pattern_ids,
+            files={},
+            matches=[],
+            scanned_files=[],
+            skipped_files=all_skipped_files,
+            file_chunks={},
+            context_lines={},
+            before_context=context_before,
+            after_context=context_after,
+        )
 
     # Generate file IDs for all files
     file_ids = {f"f{i + 1}": filepath for i, filepath in enumerate(all_files_to_parse)}
@@ -704,9 +701,9 @@ def parse_paths_json(
     if hooks:
         hooks.files = file_ids
 
-    # Parse all files using JSON-based multi-file approach
+    # Parse all files
     logger.info(f"[PARSE_JSON] Parsing {len(all_files_to_parse)} file(s) with {len(pattern_ids)} pattern(s)")
-    matches, context_dict, file_chunk_counts = parse_multiple_files_multipattern_json(
+    matches, context_dict, file_chunk_counts = parse_multiple_files_multipattern(
         all_files_to_parse,
         pattern_ids,
         file_ids,
@@ -717,18 +714,14 @@ def parse_paths_json(
         hooks,
     )
 
-    result = {
-        "patterns": pattern_ids,
-        "files": file_ids,
-        "matches": matches,
-        "scanned_files": all_files_to_parse if all_scanned_dirs else [],
-        "skipped_files": all_skipped_files,
-        "file_chunks": file_chunk_counts,
-    }
-
-    # Always include context_lines when samples mode is active (even if context=0)
-    result["context_lines"] = context_dict
-    result["before_context"] = context_before
-    result["after_context"] = context_after
-
-    return result
+    return ParseResult(
+        patterns=pattern_ids,
+        files=file_ids,
+        matches=matches,
+        scanned_files=all_files_to_parse if all_scanned_dirs else [],
+        skipped_files=all_skipped_files,
+        file_chunks=file_chunk_counts,
+        context_lines=context_dict,
+        before_context=context_before,
+        after_context=context_after,
+    )
