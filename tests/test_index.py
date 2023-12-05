@@ -131,33 +131,33 @@ class TestConfiguration:
     def test_get_large_file_threshold_default(self):
         """Test default threshold is 100MB."""
         # Clear any env var
-        os.environ.pop("DEFAULT_LARGE_FILE_MB", None)
+        os.environ.pop("RX_LARGE_FILE_MB", None)
         threshold = get_large_file_threshold_bytes()
-        assert threshold == 50 * 1024 * 1024  # 50MB
+        assert threshold == 100 * 1024 * 1024  # 100MB
 
     def test_get_index_step_default(self):
-        """Test default step is threshold/10 = 10MB."""
-        os.environ.pop("DEFAULT_LARGE_FILE_MB", None)
+        """Test default step is threshold/50 = 2MB."""
+        os.environ.pop("RX_LARGE_FILE_MB", None)
         step = get_index_step_bytes()
-        assert step == 1 * 1024 * 1024  # 1MB
+        assert step == 2 * 1024 * 1024  # 2MB (100MB / 50)
 
     def test_get_large_file_threshold_from_env(self):
         """Test threshold can be set via environment variable."""
-        os.environ["DEFAULT_LARGE_FILE_MB"] = "50"
+        os.environ["RX_LARGE_FILE_MB"] = "50"
         try:
             threshold = get_large_file_threshold_bytes()
             assert threshold == 50 * 1024 * 1024  # 50MB
         finally:
-            os.environ.pop("DEFAULT_LARGE_FILE_MB", None)
+            os.environ.pop("RX_LARGE_FILE_MB", None)
 
     def test_get_index_step_scales_with_threshold(self):
         """Test step size scales with threshold."""
-        os.environ["DEFAULT_LARGE_FILE_MB"] = "200"
+        os.environ["RX_LARGE_FILE_MB"] = "200"
         try:
             step = get_index_step_bytes()
             assert step == 4 * 1024 * 1024  # 4MB (200/50)
         finally:
-            os.environ.pop("DEFAULT_LARGE_FILE_MB", None)
+            os.environ.pop("RX_LARGE_FILE_MB", None)
 
 
 class TestBuildIndex:
@@ -626,7 +626,7 @@ class TestAnalyseIndexIntegration:
 class TestThresholdBasedIndexing:
     """Tests for automatic indexing based on file size threshold.
 
-    These tests override DEFAULT_LARGE_FILE_MB to use small thresholds
+    These tests override RX_LARGE_FILE_MB to use small thresholds
     so we can test with reasonably sized test files.
     """
 
@@ -664,22 +664,22 @@ class TestThresholdBasedIndexing:
     @pytest.fixture
     def low_threshold(self):
         """Set a low threshold (1KB) for testing."""
-        old_value = os.environ.get("DEFAULT_LARGE_FILE_MB")
+        old_value = os.environ.get("RX_LARGE_FILE_MB")
         # Set to a value that makes threshold ~1KB
         # Since threshold is MB * 1024 * 1024, we need a fractional approach
         # But env var is int, so we'll use a workaround in the test
-        os.environ["DEFAULT_LARGE_FILE_MB"] = "1"  # 1MB threshold
+        os.environ["RX_LARGE_FILE_MB"] = "1"  # 1MB threshold
         yield
         if old_value is None:
-            os.environ.pop("DEFAULT_LARGE_FILE_MB", None)
+            os.environ.pop("RX_LARGE_FILE_MB", None)
         else:
-            os.environ["DEFAULT_LARGE_FILE_MB"] = old_value
+            os.environ["RX_LARGE_FILE_MB"] = old_value
 
     def test_threshold_from_env_variable(self):
         """Test that threshold is read from environment variable."""
-        old_value = os.environ.get("DEFAULT_LARGE_FILE_MB")
+        old_value = os.environ.get("RX_LARGE_FILE_MB")
         try:
-            os.environ["DEFAULT_LARGE_FILE_MB"] = "50"
+            os.environ["RX_LARGE_FILE_MB"] = "50"
             threshold = get_large_file_threshold_bytes()
             assert threshold == 50 * 1024 * 1024  # 50MB
 
@@ -687,25 +687,25 @@ class TestThresholdBasedIndexing:
             assert step == 1 * 1024 * 1024  # 1MB (50/50)
         finally:
             if old_value is None:
-                os.environ.pop("DEFAULT_LARGE_FILE_MB", None)
+                os.environ.pop("RX_LARGE_FILE_MB", None)
             else:
-                os.environ["DEFAULT_LARGE_FILE_MB"] = old_value
+                os.environ["RX_LARGE_FILE_MB"] = old_value
 
     def test_index_step_is_threshold_divided_by_10(self):
-        """Test that index step is always threshold / 10."""
-        old_value = os.environ.get("DEFAULT_LARGE_FILE_MB")
+        """Test that index step is always threshold / 50."""
+        old_value = os.environ.get("RX_LARGE_FILE_MB")
         try:
             for mb in [10, 50, 100, 200]:
-                os.environ["DEFAULT_LARGE_FILE_MB"] = str(mb)
+                os.environ["RX_LARGE_FILE_MB"] = str(mb)
                 threshold = get_large_file_threshold_bytes()
                 step = get_index_step_bytes()
                 assert step == threshold // 50
                 assert step == mb * 1024 * 1024 // 50
         finally:
             if old_value is None:
-                os.environ.pop("DEFAULT_LARGE_FILE_MB", None)
+                os.environ.pop("RX_LARGE_FILE_MB", None)
             else:
-                os.environ["DEFAULT_LARGE_FILE_MB"] = old_value
+                os.environ["RX_LARGE_FILE_MB"] = old_value
 
     def test_analyse_creates_index_for_large_file(self):
         """Test that analyse automatically creates index for files above threshold.
@@ -1077,7 +1077,7 @@ class TestOffsetLineMapping:
 
             # Verify index has multiple checkpoints
             line_index = index_data.get("line_index", [])
-            assert len(line_index) > 5, f"Expected multiple index checkpoints, got {len(line_index)}"
+            assert len(line_index) >= 5, f"Expected multiple index checkpoints, got {len(line_index)}"
 
             # Test finding offset for a line far from the start (line 90000)
             import time

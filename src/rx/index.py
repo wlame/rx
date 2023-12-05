@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 # Constants
 INDEX_VERSION = 1
-DEFAULT_LARGE_FILE_MB = 50
+DEFAULT_LARGE_FILE_MB = 100  # Default threshold if RX_LARGE_FILE_MB not set
 CACHE_DIR_NAME = "rx/indexes"
 
 
@@ -51,10 +51,13 @@ def get_cache_dir() -> Path:
 def get_large_file_threshold_bytes() -> int:
     """Get the threshold in bytes for creating indexes.
 
-    Controlled by RX_LARGE_TEXT_FILE_MB environment variable.
-    Default: 100MB
+    Controlled by RX_LARGE_FILE_MB environment variable.
+    Default: 100 MB (DEFAULT_LARGE_FILE_MB constant)
+
+    Returns:
+        Threshold in bytes for considering a file "large" enough to create an index
     """
-    threshold_mb = get_int_env("DEFAULT_LARGE_FILE_MB")
+    threshold_mb = get_int_env("RX_LARGE_FILE_MB")
     if threshold_mb <= 0:
         threshold_mb = DEFAULT_LARGE_FILE_MB
     return threshold_mb * 1024 * 1024
