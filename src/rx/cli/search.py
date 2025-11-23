@@ -1,30 +1,20 @@
 """CLI search command for RX"""
 
+import json
 import os
 import re
 import sys
-import json
-import click
 from time import time
-from typing import Dict, Tuple, Optional
+from typing import Dict, Optional, Tuple
 
+import click
+
+from rx.models import ContextLine, Match, TraceResponse
 from rx.parse_json import parse_paths_json
-from rx.models import TraceResponse, Match, ContextLine
 
 
 def format_context_header(file_val: str, offset_str: str, pattern_val: str, colorize: bool) -> str:
-    """
-    Format the header line for a context block.
-
-    Args:
-        file_val: File path
-        offset_str: Byte offset as string
-        pattern_val: Pattern that matched
-        colorize: Whether to apply color styling
-
-    Returns:
-        Formatted header string
-    """
+    """Format the header line for a context block."""
     if colorize:
         return (
             click.style("=== ", fg="bright_black")
@@ -45,18 +35,7 @@ def format_context_header(file_val: str, offset_str: str, pattern_val: str, colo
 def find_match_for_context(
     response: TraceResponse, pattern_id: str, file_id: str, offset_int: int
 ) -> Tuple[Optional[str], Optional[int]]:
-    """
-    Find the matched line and line number for a given context block.
-
-    Args:
-        response: The TraceResponse containing matches
-        pattern_id: Pattern ID to search for
-        file_id: File ID to search for
-        offset_int: Byte offset to search for
-
-    Returns:
-        Tuple of (matched_line_text, line_number) or (None, None)
-    """
+    """Find the matched line and line number for a given context block."""
     for match in response.matches:
         if match.pattern == pattern_id and match.file == file_id and match.offset == offset_int:
             return match.line_text, match.line_number
@@ -189,7 +168,7 @@ def display_samples_output(
     click.echo()
 
     # Display context blocks
-    if response.context_lines:
+    if response.context_lines is not None:
         for composite_key in sorted(response.context_lines.keys()):
             display_context_block(composite_key, response, pattern_ids, file_ids, colorize)
     else:
@@ -320,6 +299,7 @@ def search_command(
         os.environ['RX_DEBUG'] = '1'
         # Reload the parse_json module to pick up the new DEBUG_MODE setting
         import importlib
+
         from rx import parse_json
 
         importlib.reload(parse_json)

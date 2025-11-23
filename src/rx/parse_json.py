@@ -5,19 +5,19 @@ ripgrep's --json output format for richer match data and context extraction.
 """
 
 import logging
-import time
-import threading
-import subprocess
-from typing import List, Tuple, Dict, Optional
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from collections import defaultdict
-from datetime import datetime
-
-from rx.parse import FileTask, create_file_tasks, MAX_SUBPROCESSES, scan_directory_for_text_files, validate_file
-from rx.cli import prometheus as prom
-from rx.rg_json import parse_rg_json_event, RgMatchEvent, RgContextEvent
-from rx.models import Submatch, ContextLine
 import os
+import subprocess
+import threading
+import time
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple
+
+from rx.cli import prometheus as prom
+from rx.models import ContextLine, Submatch
+from rx.parse import MAX_SUBPROCESSES, FileTask, create_file_tasks, scan_directory_for_text_files, validate_file
+from rx.rg_json import RgContextEvent, RgMatchEvent, parse_rg_json_event
 
 logger = logging.getLogger(__name__)
 
@@ -458,14 +458,26 @@ def parse_multiple_files_multipattern_json(
     # Group context lines by match
     # Build composite key: "pattern:file:offset" -> [ContextLine, ...]
     context_dict = {}
-    if context_before > 0 or context_after > 0:
-        # For each match, find nearby context lines
-        for match in matches:
-            match_line = match['line_number']
-            match_file = match['file']
-            match_pattern = match['pattern']
 
-            # Find context lines for this file near this match
+    # Build a mapping of (file_id, line_number) -> match data for all matches
+    # This helps us fill in matched lines that should appear in context but aren't in all_context_lines
+    match_line_map = {(match['file'], match['line_number']): match for match in matches}
+
+    # For each match, build context lines
+    for match in matches:
+        match_line = match['line_number']
+        match_file = match['file']
+        match_pattern = match['pattern']
+        composite_key = f"{match_pattern}:{match_file}:{match['offset']}"
+
+        # Always create a ContextLine for the matched line itself
+        matched_context_line = ContextLine(
+            line_number=match['line_number'], line_text=match['line_text'], absolute_offset=match['offset']
+        )
+
+        if context_before > 0 or context_after > 0:
+            # Find nearby context lines for this file near this match
+            # Include ALL lines in the context range, even if they are matches
             # all_context_lines is now a list of (file_id, ContextLine) tuples
             nearby_context = [
                 ctx_line
@@ -476,11 +488,32 @@ def parse_multiple_files_multipattern_json(
                 )
             ]
 
-            if nearby_context:
-                composite_key = f"{match_pattern}:{match_file}:{match['offset']}"
-                # Sort context lines by line number
-                nearby_context.sort(key=lambda ctx: ctx.line_number)
-                context_dict[composite_key] = nearby_context
+            # Also check if any matched lines fall in the context range but aren't in nearby_context
+            # This can happen when a line matches multiple patterns
+            context_line_numbers = {ctx.line_number for ctx in nearby_context}
+            for other_match in matches:
+                if (
+                    other_match['file'] == match_file
+                    and other_match['line_number'] != match_line
+                    and abs(other_match['line_number'] - match_line) <= max(context_before, context_after)
+                    and other_match['line_number'] not in context_line_numbers
+                ):
+                    # This matched line is in range but missing from context - add it
+                    nearby_context.append(
+                        ContextLine(
+                            line_number=other_match['line_number'],
+                            line_text=other_match['line_text'],
+                            absolute_offset=other_match['offset'],
+                        )
+                    )
+
+            # Combine context lines with the matched line and sort by line number
+            all_lines = nearby_context + [matched_context_line]
+            all_lines.sort(key=lambda ctx: ctx.line_number)
+            context_dict[composite_key] = all_lines
+        else:
+            # context=0: only show the matched line itself
+            context_dict[composite_key] = [matched_context_line]
 
     logger.info(
         f"[PARSE_JSON] Completed: {len(matches)} matches, "
@@ -555,7 +588,9 @@ def parse_paths_json(
             "matches": [],
             "scanned_files": [],
             "skipped_files": all_skipped_files,
-            "context_lines": {} if (context_before > 0 or context_after > 0) else None,
+            "context_lines": {},
+            "before_context": context_before,
+            "after_context": context_after,
         }
 
     # Generate file IDs for all files
@@ -575,10 +610,9 @@ def parse_paths_json(
         "skipped_files": all_skipped_files,
     }
 
-    # Include context_lines only if context was requested
-    if context_before > 0 or context_after > 0:
-        result["context_lines"] = context_dict
-        result["before_context"] = context_before
-        result["after_context"] = context_after
+    # Always include context_lines when samples mode is active (even if context=0)
+    result["context_lines"] = context_dict
+    result["before_context"] = context_before
+    result["after_context"] = context_after
 
     return result

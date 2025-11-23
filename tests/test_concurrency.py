@@ -8,13 +8,14 @@ Or manually with: python tests/test_concurrency.py
 
 import asyncio
 import time
+
 import httpx
 import pytest
-
 
 BASE_URL = "http://localhost:8888"
 
 
+@pytest.mark.skip(reason="Requires server to be running on localhost:8888")
 async def test_health_not_blocked_by_slow_requests():
     """
     Verify that fast endpoints like /health return immediately
@@ -57,6 +58,7 @@ async def test_health_not_blocked_by_slow_requests():
             pass
 
 
+@pytest.mark.skip(reason="Requires server to be running on localhost:8888")
 async def test_multiple_concurrent_traces():
     """
     Test that multiple trace requests can run concurrently
@@ -88,6 +90,7 @@ async def test_multiple_concurrent_traces():
         print(f"✅ All 3 trace requests completed in {elapsed:.3f}s")
 
 
+@pytest.mark.skip(reason="Requires server to be running on localhost:8888")
 async def test_complexity_during_trace():
     """
     Test that complexity endpoint (CPU-bound) doesn't block
