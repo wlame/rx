@@ -13,7 +13,7 @@ import tempfile
 
 from click.testing import CliRunner
 
-from rx.cli.search import search_command
+from rx.cli.trace import trace_command
 
 
 class TestContextZero:
@@ -35,7 +35,7 @@ class TestContextZero:
 
     def test_context_zero_shows_matches(self):
         """Test that --context=0 shows matched lines, not 'No context available'."""
-        result = self.runner.invoke(search_command, [self.test_file, "error", "--samples", "--context", "0"])
+        result = self.runner.invoke(trace_command, [self.test_file, "error", "--samples", "--context", "0"])
 
         assert result.exit_code == 0
         assert "Samples (context: 0 before, 0 after)" in result.output
@@ -49,7 +49,7 @@ class TestContextZero:
 
     def test_context_zero_json_output(self):
         """Test that --context=0 with --json returns proper structure."""
-        result = self.runner.invoke(search_command, [self.test_file, "error", "--samples", "--context", "0", "--json"])
+        result = self.runner.invoke(trace_command, [self.test_file, "error", "--samples", "--context", "0", "--json"])
 
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -71,7 +71,7 @@ class TestContextZero:
 
     def test_context_zero_only_shows_matched_lines(self):
         """Test that --context=0 only shows matched lines without surrounding context."""
-        result = self.runner.invoke(search_command, [self.test_file, "error", "--samples", "--context", "0"])
+        result = self.runner.invoke(trace_command, [self.test_file, "error", "--samples", "--context", "0"])
 
         assert result.exit_code == 0
 
@@ -118,7 +118,7 @@ class TestMatchesNearEndOfFile:
 
     def test_match_on_last_line_with_context_1(self):
         """Test that match on last line shows up with --context=1."""
-        result = self.runner.invoke(search_command, [self.test_file, "last_line", "--samples", "--context", "1"])
+        result = self.runner.invoke(trace_command, [self.test_file, "last_line", "--samples", "--context", "1"])
 
         assert result.exit_code == 0
         assert "Samples (context: 1 before, 1 after)" in result.output
@@ -134,7 +134,7 @@ class TestMatchesNearEndOfFile:
 
     def test_match_on_second_to_last_line_with_context_1(self):
         """Test that match on second-to-last line shows line after."""
-        result = self.runner.invoke(search_command, [self.test_file, "second_to_last", "--samples", "--context", "1"])
+        result = self.runner.invoke(trace_command, [self.test_file, "second_to_last", "--samples", "--context", "1"])
 
         assert result.exit_code == 0
 
@@ -146,7 +146,7 @@ class TestMatchesNearEndOfFile:
 
     def test_match_on_last_line_with_context_2(self):
         """Test that match on last line shows 2 lines before with --context=2."""
-        result = self.runner.invoke(search_command, [self.test_file, "last_line", "--samples", "--context", "2"])
+        result = self.runner.invoke(trace_command, [self.test_file, "last_line", "--samples", "--context", "2"])
 
         assert result.exit_code == 0
 
@@ -159,7 +159,7 @@ class TestMatchesNearEndOfFile:
 
     def test_all_matches_show_with_json(self):
         """Test that all matches near end of file appear in JSON output."""
-        result = self.runner.invoke(search_command, [self.test_file, "match", "--samples", "--context", "1", "--json"])
+        result = self.runner.invoke(trace_command, [self.test_file, "match", "--samples", "--context", "1", "--json"])
 
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -193,7 +193,7 @@ class TestConsecutiveMatches:
     def test_consecutive_matches_show_in_each_others_context_1(self):
         """Test that consecutive matches appear in each other's context with --context=1."""
         result = self.runner.invoke(
-            search_command,
+            trace_command,
             [self.test_file, "-e", "pattern_a", "-e", "pattern_b", "-e", "pattern_c", "--samples", "--context", "1"],
         )
 
@@ -214,7 +214,7 @@ class TestConsecutiveMatches:
     def test_consecutive_matches_show_in_each_others_context_2(self):
         """Test that consecutive matches appear in each other's context with --context=2."""
         result = self.runner.invoke(
-            search_command, [self.test_file, "-e", "pattern_a", "-e", "pattern_b", "--samples", "--context", "2"]
+            trace_command, [self.test_file, "-e", "pattern_a", "-e", "pattern_b", "--samples", "--context", "2"]
         )
 
         assert result.exit_code == 0
@@ -238,7 +238,7 @@ class TestConsecutiveMatches:
     def test_consecutive_matches_complete_context_json(self):
         """Test that JSON output has complete context for consecutive matches."""
         result = self.runner.invoke(
-            search_command,
+            trace_command,
             [self.test_file, "-e", "pattern_a", "-e", "pattern_b", "--samples", "--context", "2", "--json"],
         )
 
@@ -276,7 +276,7 @@ class TestConsecutiveMatches:
             f.write("line 5: ultimate match")  # No trailing newline
 
         result = self.runner.invoke(
-            search_command, [test_file, "-e", "penultimate", "-e", "ultimate", "--samples", "--context", "1"]
+            trace_command, [test_file, "-e", "penultimate", "-e", "ultimate", "--samples", "--context", "1"]
         )
 
         assert result.exit_code == 0
@@ -310,7 +310,7 @@ class TestContextCombinations:
 
     def test_context_4_shows_4_lines_before_and_after(self):
         """Test that --context=4 shows 4 lines before and after."""
-        result = self.runner.invoke(search_command, [self.test_file, "match", "--samples", "--context", "4"])
+        result = self.runner.invoke(trace_command, [self.test_file, "match", "--samples", "--context", "4"])
 
         assert result.exit_code == 0
         assert "Samples (context: 4 before, 4 after)" in result.output
@@ -333,7 +333,7 @@ class TestContextCombinations:
     def test_asymmetric_context_before_2_after_1(self):
         """Test --before=2 --after=1."""
         result = self.runner.invoke(
-            search_command, [self.test_file, "match", "--samples", "--before", "2", "--after", "1"]
+            trace_command, [self.test_file, "match", "--samples", "--before", "2", "--after", "1"]
         )
 
         assert result.exit_code == 0

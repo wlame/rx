@@ -178,15 +178,15 @@ class TestFileAnalyzer:
         assert result.line_length_max is None
 
     def test_file_hook(self, temp_text_file):
-        """Test registering and executing file hooks"""
-        analyzer = FileAnalyzer()
+        """Test overriding file hook method"""
         hook_called = []
 
-        def my_hook(filepath, result):
-            hook_called.append(filepath)
-            result.custom_metrics['hook_executed'] = True
+        class CustomAnalyzer(FileAnalyzer):
+            def file_hook(self, filepath, result):
+                hook_called.append(filepath)
+                result.custom_metrics['hook_executed'] = True
 
-        analyzer.register_file_hook(my_hook)
+        analyzer = CustomAnalyzer()
         result = analyzer.analyze_file(temp_text_file, "f1")
 
         assert len(hook_called) == 1
@@ -194,29 +194,29 @@ class TestFileAnalyzer:
         assert result.custom_metrics.get('hook_executed') is True
 
     def test_line_hook(self, temp_text_file):
-        """Test registering and executing line hooks"""
-        analyzer = FileAnalyzer()
+        """Test overriding line hook method"""
         lines_processed = []
 
-        def my_hook(line, line_num, result):
-            lines_processed.append((line_num, len(line)))
+        class CustomAnalyzer(FileAnalyzer):
+            def line_hook(self, line, line_num, result):
+                lines_processed.append((line_num, len(line)))
 
-        analyzer.register_line_hook(my_hook)
+        analyzer = CustomAnalyzer()
         result = analyzer.analyze_file(temp_text_file, "f1")
 
         assert len(lines_processed) == 5  # 5 lines in file
         assert lines_processed[0][0] == 1  # First line number
 
     def test_post_hook(self, temp_text_file):
-        """Test registering and executing post hooks"""
-        analyzer = FileAnalyzer()
+        """Test overriding post hook method"""
         post_hook_called = []
 
-        def my_hook(result):
-            post_hook_called.append(True)
-            result.custom_metrics['post_processed'] = result.line_count
+        class CustomAnalyzer(FileAnalyzer):
+            def post_hook(self, result):
+                post_hook_called.append(True)
+                result.custom_metrics['post_processed'] = result.line_count
 
-        analyzer.register_post_hook(my_hook)
+        analyzer = CustomAnalyzer()
         result = analyzer.analyze_file(temp_text_file, "f1")
 
         assert len(post_hook_called) == 1
@@ -224,22 +224,19 @@ class TestFileAnalyzer:
 
     def test_multiple_hooks(self, temp_text_file):
         """Test multiple hooks of different types"""
-        analyzer = FileAnalyzer()
         execution_order = []
 
-        def file_hook(filepath, result):
-            execution_order.append('file')
+        class CustomAnalyzer(FileAnalyzer):
+            def file_hook(self, filepath, result):
+                execution_order.append('file')
 
-        def line_hook(line, line_num, result):
-            execution_order.append(f'line_{line_num}')
+            def line_hook(self, line, line_num, result):
+                execution_order.append(f'line_{line_num}')
 
-        def post_hook(result):
-            execution_order.append('post')
+            def post_hook(self, result):
+                execution_order.append('post')
 
-        analyzer.register_file_hook(file_hook)
-        analyzer.register_line_hook(line_hook)
-        analyzer.register_post_hook(post_hook)
-
+        analyzer = CustomAnalyzer()
         result = analyzer.analyze_file(temp_text_file, "f1")
 
         # File hook should run first, then line hooks, then post hook

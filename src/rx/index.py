@@ -15,11 +15,15 @@ import json
 import logging
 import os
 import statistics
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+# Import noop prometheus stub by default (CLI mode)
+# Real prometheus is only imported in web.py for server mode
+from rx.cli import prometheus as prom
 from rx.utils import NEWLINE_SYMBOL, get_int_env
 
 logger = logging.getLogger(__name__)
@@ -128,6 +132,7 @@ def load_index(index_path: Path | str) -> dict | None:
     Returns:
         Index data dictionary, or None if loading fails
     """
+    start_time = time.time()
     try:
         with open(index_path, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -135,11 +140,14 @@ def load_index(index_path: Path | str) -> dict | None:
         # Validate version
         if data.get("version") != INDEX_VERSION:
             logger.warning(f"Index version mismatch: {data.get('version')} != {INDEX_VERSION}")
+            prom.index_load_duration_seconds.observe(time.time() - start_time)
             return None
 
+        prom.index_load_duration_seconds.observe(time.time() - start_time)
         return data
     except (OSError, json.JSONDecodeError) as e:
         logger.debug(f"Failed to load index {index_path}: {e}")
+        prom.index_load_duration_seconds.observe(time.time() - start_time)
         return None
 
 
@@ -250,6 +258,8 @@ def build_index(source_path: str, step_bytes: int | None = None) -> IndexBuildRe
     Returns:
         IndexBuildResult with line index and analysis data
     """
+    start_time = time.time()
+
     if step_bytes is None:
         step_bytes = get_index_step_bytes()
 
@@ -318,6 +328,9 @@ def build_index(source_path: str, step_bytes: int | None = None) -> IndexBuildRe
         line_length_stddev = 0.0
 
     line_ending = _detect_line_ending(line_ending_sample)
+
+    # Record metrics
+    prom.index_build_duration_seconds.observe(time.time() - start_time)
 
     return IndexBuildResult(
         line_index=line_index,
@@ -431,8 +444,11 @@ def calculate_exact_offset_for_line(filename: str, target_line: int, index_data:
     """
     # If no index provided, try to load it
     if index_data is None:
+        prom.index_cache_misses_total.inc()
         index_path = get_index_path(filename)
         index_data = load_index(index_path)
+    else:
+        prom.index_cache_hits_total.inc()
 
     # If we have an index, use it
     if index_data:
@@ -507,8 +523,11 @@ def calculate_exact_line_for_offset(filename: str, target_offset: int, index_dat
     """
     # If no index provided, try to load it
     if index_data is None:
+        prom.index_cache_misses_total.inc()
         index_path = get_index_path(filename)
         index_data = load_index(index_path)
+    else:
+        prom.index_cache_hits_total.inc()
 
     # If we have an index, use it
     if index_data:

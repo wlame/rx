@@ -88,13 +88,15 @@ class FileAnalyzer:
     """
     Pluggable file analysis system.
 
-    Supports adding custom analysis functions that can:
-    - Analyze file metadata
-    - Process file content line by line
-    - Compute custom metrics
+    Supports custom analysis via overridable hook methods:
+    - file_hook(): Processes file metadata after basic info is gathered
+    - line_hook(): Processes each line during iteration
+    - post_hook(): Runs after file processing is complete
 
     For large files (>= RX_LARGE_TEXT_FILE_MB), analysis results are cached
     in index files for faster subsequent access.
+
+    To add custom analysis, subclass FileAnalyzer and override the hook methods.
     """
 
     def __init__(self, use_index_cache: bool = True):
@@ -104,34 +106,43 @@ class FileAnalyzer:
             use_index_cache: If True, use cached analysis from index files
                            when available. Default: True
         """
-        self.file_hooks: list[Callable] = []
-        self.line_hooks: list[Callable] = []
-        self.post_hooks: list[Callable] = []
         self.use_index_cache = use_index_cache
 
-    def register_file_hook(self, hook: Callable):
+    def file_hook(self, filepath: str, result: FileAnalysisResult) -> None:
         """
-        Register a hook that processes file metadata.
+        Hook that processes file metadata.
 
-        Hook signature: hook(filepath: str, result: FileAnalysisResult) -> None
-        """
-        self.file_hooks.append(hook)
+        Override this method to add custom file-level analysis.
 
-    def register_line_hook(self, hook: Callable):
+        Args:
+            filepath: Path to the file being analyzed
+            result: FileAnalysisResult object to update with custom metrics
         """
-        Register a hook that processes each line.
+        pass
 
-        Hook signature: hook(line: str, line_num: int, result: FileAnalysisResult) -> None
+    def line_hook(self, line: str, line_num: int, result: FileAnalysisResult) -> None:
         """
-        self.line_hooks.append(hook)
+        Hook that processes each line.
 
-    def register_post_hook(self, hook: Callable):
-        """
-        Register a hook that runs after file processing.
+        Override this method to add custom line-level analysis.
 
-        Hook signature: hook(result: FileAnalysisResult) -> None
+        Args:
+            line: The current line content
+            line_num: The line number (1-indexed)
+            result: FileAnalysisResult object to update with custom metrics
         """
-        self.post_hooks.append(hook)
+        pass
+
+    def post_hook(self, result: FileAnalysisResult) -> None:
+        """
+        Hook that runs after file processing.
+
+        Override this method to add custom post-processing analysis.
+
+        Args:
+            result: FileAnalysisResult object to update with custom metrics
+        """
+        pass
 
     def _try_load_from_cache(self, filepath: str, file_id: str) -> FileAnalysisResult | None:
         """Try to load analysis results from cached index.
@@ -211,16 +222,14 @@ class FileAnalyzer:
         cached_result = self._try_load_from_cache(filepath, file_id)
         if cached_result is not None:
             # Still run hooks on cached result
-            for hook in self.file_hooks:
-                try:
-                    hook(filepath, cached_result)
-                except Exception as e:
-                    logger.warning(f"File hook failed for {filepath}: {e}")
-            for hook in self.post_hooks:
-                try:
-                    hook(cached_result)
-                except Exception as e:
-                    logger.warning(f"Post hook failed for {filepath}: {e}")
+            try:
+                self.file_hook(filepath, cached_result)
+            except Exception as e:
+                logger.warning(f"File hook failed for {filepath}: {e}")
+            try:
+                self.post_hook(cached_result)
+            except Exception as e:
+                logger.warning(f"Post hook failed for {filepath}: {e}")
             return cached_result
 
         try:
@@ -249,11 +258,10 @@ class FileAnalyzer:
                 result.owner = str(stat_info.st_uid)
 
             # Run file-level hooks
-            for hook in self.file_hooks:
-                try:
-                    hook(filepath, result)
-                except Exception as e:
-                    logger.warning(f"File hook failed for {filepath}: {e}")
+            try:
+                self.file_hook(filepath, result)
+            except Exception as e:
+                logger.warning(f"File hook failed for {filepath}: {e}")
 
             # Analyze text files
             if result.is_text:
@@ -264,11 +272,10 @@ class FileAnalyzer:
                     self._create_index_for_result(filepath, result)
 
             # Run post-processing hooks
-            for hook in self.post_hooks:
-                try:
-                    hook(result)
-                except Exception as e:
-                    logger.warning(f"Post hook failed for {filepath}: {e}")
+            try:
+                self.post_hook(result)
+            except Exception as e:
+                logger.warning(f"Post hook failed for {filepath}: {e}")
 
             return result
 
@@ -370,11 +377,10 @@ class FileAnalyzer:
                         empty_line_count += 1
 
                     # Run line-level hooks on the fly
-                    for hook in self.line_hooks:
-                        try:
-                            hook(line, line_num, result)
-                        except Exception as e:
-                            logger.warning(f"Line hook {hook.__name__} failed at {filepath}:{line_num}: {e}")
+                    try:
+                        self.line_hook(line, line_num, result)
+                    except Exception as e:
+                        logger.warning(f"Line hook failed at {filepath}:{line_num}: {e}")
 
                     byte_offset += line_byte_length
 

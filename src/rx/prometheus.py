@@ -19,6 +19,13 @@ samples_requests_total = Counter('rx_samples_requests_total', 'Total number of s
 # Total number of complexity analysis requests
 complexity_requests_total = Counter('rx_complexity_requests_total', 'Total number of complexity analysis requests')
 
+# Total number of analyse requests
+analyse_requests_total = Counter(
+    'rx_analyse_requests_total',
+    'Total number of file analysis requests',
+    ['status'],  # success, error
+)
+
 
 # ============================================================================
 # Performance Metrics
@@ -44,6 +51,13 @@ complexity_duration_seconds = Histogram(
     'Time spent analyzing regex complexity',
     buckets=[0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0],
     # 0.1ms to 1s - complexity analysis is very fast
+)
+
+analyse_duration_seconds = Histogram(
+    'rx_analyse_duration_seconds',
+    'Time spent processing file analysis requests',
+    buckets=[0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0],
+    # 10ms to 60s - file analysis can take time for large files or many files
 )
 
 # Ripgrep processing time (core search duration)
@@ -76,6 +90,8 @@ file_size_bytes = Histogram(
         1_073_741_824,  # 1GB
         5_368_709_120,  # 5GB
         10_737_418_240,  # 10GB
+        26_843_545_600,  # 25GB
+        53_687_091_200,  # 50GB
     ],
 )
 
@@ -195,6 +211,30 @@ context_lines_after = Histogram(
 
 
 # ============================================================================
+# Index Operation Metrics
+# ============================================================================
+
+# Index cache hits and misses
+index_cache_hits_total = Counter('rx_index_cache_hits_total', 'Number of index cache hits')
+
+index_cache_misses_total = Counter('rx_index_cache_misses_total', 'Number of index cache misses')
+
+# Index load duration
+index_load_duration_seconds = Histogram(
+    'rx_index_load_duration_seconds',
+    'Time to load index from disk',
+    buckets=[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0],
+)
+
+# Index build duration
+index_build_duration_seconds = Histogram(
+    'rx_index_build_duration_seconds',
+    'Time to build new index',
+    buckets=[0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0],
+)
+
+
+# ============================================================================
 # Helper Functions
 # ============================================================================
 
@@ -275,6 +315,29 @@ def record_complexity_request(duration: float, score: int, level: str):
     complexity_duration_seconds.observe(duration)
     regex_complexity_score.observe(score)
     regex_complexity_level.labels(level=level).inc()
+
+
+def record_analyse_request(
+    status: str, duration: float, num_files: int, num_skipped: int, total_bytes: int, num_workers: int
+):
+    """
+    Record metrics for a file analysis request.
+
+    Args:
+        status: Request status (success, error)
+        duration: Request duration in seconds
+        num_files: Number of files analyzed
+        num_skipped: Number of files skipped
+        total_bytes: Total bytes analyzed
+        num_workers: Number of parallel workers used
+    """
+    analyse_requests_total.labels(status=status).inc()
+    analyse_duration_seconds.observe(duration)
+    files_processed_total.inc(num_files)
+    files_skipped_total.inc(num_skipped)
+    bytes_processed_total.inc(total_bytes)
+    if num_workers > 0:
+        active_workers.set(num_workers)
 
 
 def record_file_size(size_bytes: int):

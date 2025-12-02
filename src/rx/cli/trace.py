@@ -1,4 +1,4 @@
-"""CLI search command for RX"""
+"""CLI trace command for RX"""
 
 import json
 import os
@@ -244,11 +244,11 @@ def handle_samples_output(
 @click.option('--no-color', is_flag=True, help="Disable colored output")
 @click.option('--debug', is_flag=True, help="Enable debug mode (creates .debug_* files)")
 @click.pass_context
-def search_command(
+def trace_command(
     ctx, path_arg, regex_arg, path, regexp, max_results, samples, context, before, after, output_json, no_color, debug
 ):
     """
-    Search files and directories for regex patterns using ripgrep.
+    Trace files and directories for regex patterns using ripgrep.
 
     \b
     Basic Examples:

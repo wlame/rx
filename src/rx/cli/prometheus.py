@@ -30,10 +30,12 @@ class NoOpMetric:
 trace_requests_total = NoOpMetric()
 samples_requests_total = NoOpMetric()
 complexity_requests_total = NoOpMetric()
+analyse_requests_total = NoOpMetric()
 
 trace_duration_seconds = NoOpMetric()
 samples_duration_seconds = NoOpMetric()
 complexity_duration_seconds = NoOpMetric()
+analyse_duration_seconds = NoOpMetric()
 ripgrep_processing_seconds = NoOpMetric()
 
 files_processed_total = NoOpMetric()
@@ -63,6 +65,11 @@ offsets_per_samples_request = NoOpMetric()
 context_lines_before = NoOpMetric()
 context_lines_after = NoOpMetric()
 
+index_cache_hits_total = NoOpMetric()
+index_cache_misses_total = NoOpMetric()
+index_load_duration_seconds = NoOpMetric()
+index_build_duration_seconds = NoOpMetric()
+
 
 # No-op helper functions
 def record_trace_request(*args, **kwargs):
@@ -74,6 +81,10 @@ def record_samples_request(*args, **kwargs):
 
 
 def record_complexity_request(*args, **kwargs):
+    pass
+
+
+def record_analyse_request(*args, **kwargs):
     pass
 
 

@@ -1,4 +1,4 @@
-"""Unit tests for search.py helper functions"""
+"""Unit tests for trace.py helper functions"""
 
 from io import StringIO
 from unittest.mock import Mock, patch
@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 import click
 import pytest
 
-from rx.cli.search import (
+from rx.cli.trace import (
     build_lines_dict,
     display_context_block,
     display_samples_output,
@@ -346,7 +346,7 @@ class TestHandleSamplesOutput:
         assert '"path"' in output
         assert '"matches"' in output
 
-    @patch('rx.cli.search.display_samples_output')
+    @patch('rx.cli.trace.display_samples_output')
     def test_calls_display_function_for_cli_output(self, mock_display):
         """Test calls display_samples_output for CLI format"""
         response = TraceResponse(

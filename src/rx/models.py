@@ -431,16 +431,6 @@ class ComplexityResponse(BaseModel):
         WHITE = '\033[97m'
         RESET = '\033[0m'
 
-        # Box drawing characters
-        BOX_TL = '╔'
-        BOX_TR = '╗'
-        BOX_BL = '╚'
-        BOX_BR = '╝'
-        BOX_H = '═'
-        BOX_V = '║'
-        BOX_ML = '╠'
-        BOX_MR = '╣'
-
         lines = []
 
         # Determine colors based on risk level
@@ -459,33 +449,21 @@ class ComplexityResponse(BaseModel):
         grey = GREY if colorize else ""
         cyan = CYAN if colorize else ""
 
-        # Header box
-        box_width = 66
-
-        def box_line(content: str, pad: bool = True) -> str:
-            if pad:
-                return f"{BOX_V}  {content:<{box_width - 4}}  {BOX_V}"
-            return f"{BOX_V}{content:^{box_width}}{BOX_V}"
-
-        lines.append(f"{BOX_TL}{BOX_H * box_width}{BOX_TR}")
-        lines.append(box_line("COMPLEXITY ANALYSIS"))
-        lines.append(f"{BOX_ML}{BOX_H * box_width}{BOX_MR}")
+        # Header
+        lines.append(f"{bold}COMPLEXITY ANALYSIS{reset}")
+        lines.append("")
 
         # Risk level with color
-        risk_display = f"Risk Level: {level_color}{self.risk_level.upper()}{reset}"
-        lines.append(box_line(risk_display))
+        lines.append(f"{grey}Risk Level:{reset} {level_color}{self.risk_level.upper()}{reset}")
 
         # Complexity
-        complexity_display = (
-            f"Complexity: {level_color}{self.complexity_class.upper()} {self.complexity_notation}{reset}"
+        lines.append(
+            f"{grey}Complexity:{reset} {level_color}{self.complexity_class.upper()} {self.complexity_notation}{reset}"
         )
-        lines.append(box_line(complexity_display))
 
         # Score
-        score_display = f"Score: {level_color}{self.score:.0f}/100{reset}"
-        lines.append(box_line(score_display))
+        lines.append(f"{grey}Score:{reset} {level_color}{self.score:.0f}/100{reset}")
 
-        lines.append(f"{BOX_BL}{BOX_H * box_width}{BOX_BR}")
         lines.append("")
 
         # Pattern
@@ -516,7 +494,7 @@ class ComplexityResponse(BaseModel):
                     lines.append(f"    {grey}Pattern segment:{reset} {cyan}{issue.segment}{reset}")
 
                 lines.append("")
-                lines.append(f"    {bold}EXPLANATION:{reset}")
+                lines.append(f"    {bold}Explanation:{reset}")
 
                 # Word wrap explanation
                 explanation = issue.explanation
@@ -535,9 +513,9 @@ class ComplexityResponse(BaseModel):
 
                 # Fix suggestions
                 if issue.fix_suggestions:
-                    lines.append(f"    {bold}FIX SUGGESTIONS:{reset}")
+                    lines.append(f"    {bold}Fix Suggestions:{reset}")
                     for i, suggestion in enumerate(issue.fix_suggestions, 1):
-                        lines.append(f"    {i}. {suggestion}")
+                        lines.append(f"      {i}. {suggestion}")
                     lines.append("")
         else:
             lines.append(f"{bold}PATTERN CHARACTERISTICS:{reset}")
@@ -571,9 +549,11 @@ class ComplexityResponse(BaseModel):
 
         # Final verdict
         if perf.safe_for_large_files:
-            lines.append(f"{GREEN if colorize else ''}This pattern is safe for large files.{reset}")
+            lines.append(f"{GREEN if colorize else ''}{icon}{reset} This pattern is safe for large files.")
         else:
-            lines.append(f"{RED if colorize else ''}This pattern may cause performance issues on large files.{reset}")
+            lines.append(
+                f"{RED if colorize else ''}{icon}{reset} This pattern may cause performance issues on large files."
+            )
 
         return "\n".join(lines)
 

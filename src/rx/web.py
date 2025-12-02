@@ -202,6 +202,9 @@ async def health():
     constants = get_constants()
     env_vars = get_app_env_variables()
 
+    # Record metrics
+    prom.record_http_response('GET', '/', 200)
+
     return {
         'status': 'ok',
         'ripgrep_available': app.state.rg_path is not None,
@@ -482,6 +485,22 @@ async def analyse(
         duration = time() - time_before
 
         # Record metrics
+        num_files = len(result.get('scanned_files', []))
+        num_skipped = len(result.get('skipped_files', []))
+
+        # Calculate total bytes analyzed
+        total_bytes = 0
+        for file_result in result.get('results', []):
+            total_bytes += file_result.get('size_bytes', 0)
+
+        prom.record_analyse_request(
+            status='success',
+            duration=duration,
+            num_files=num_files,
+            num_skipped=num_skipped,
+            total_bytes=total_bytes,
+            num_workers=max_workers,
+        )
         prom.record_http_response('GET', '/v1/analyse', 200)
 
         return result
@@ -490,6 +509,9 @@ async def analyse(
     except Exception as e:
         logger.error(f"Error analyzing files: {str(e)}")
         prom.record_error('internal_error')
+        prom.record_analyse_request(
+            status='error', duration=0, num_files=0, num_skipped=0, total_bytes=0, num_workers=max_workers
+        )
         prom.record_http_response('GET', '/v1/analyse', 500)
         raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
 

@@ -9,8 +9,8 @@ from rx.cli.analyse import analyse_command
 from rx.cli.check import check_command
 from rx.cli.index import index_command
 from rx.cli.samples import samples_command
-from rx.cli.search import search_command
 from rx.cli.serve import serve_command
+from rx.cli.trace import trace_command
 
 
 class DefaultCommandGroup(click.Group):
@@ -25,9 +25,9 @@ class DefaultCommandGroup(click.Group):
         if args and args[0] in self.commands:
             return super().parse_args(ctx, args)
 
-        # Otherwise, treat as search command (default)
-        # Insert 'search' as the command name
-        return super().parse_args(ctx, ['search'] + args)
+        # Otherwise, treat as trace command (default)
+        # Insert 'trace' as the command name
+        return super().parse_args(ctx, ['trace'] + args)
 
 
 @click.group(cls=DefaultCommandGroup, invoke_without_command=True)
@@ -35,11 +35,11 @@ class DefaultCommandGroup(click.Group):
 @click.pass_context
 def cli(ctx):
     """
-    RX (Regex Tracer) - High-performance file search and analysis tool.
+    RX (Regex Tracer) - High-performance file tracing and analysis tool.
 
     \b
     Commands:
-      rx <path> <pattern>     Search files (default command)
+      rx <path> <pattern>     Trace files for patterns (default command)
       rx analyse <path>       Analyze files (metadata, statistics)
       rx check <pattern>      Analyze regex complexity
       rx index <path>         Create/manage large file indexes
@@ -66,8 +66,8 @@ def cli(ctx):
         ctx.exit(0)
 
 
-# Register subcommands (search is the default command)
-cli.add_command(search_command, name='search')
+# Register subcommands (trace is the default command)
+cli.add_command(trace_command, name='trace')
 cli.add_command(analyse_command, name='analyse')
 cli.add_command(check_command, name='check')
 cli.add_command(index_command, name='index')

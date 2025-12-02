@@ -11,7 +11,7 @@ import tempfile
 
 from click.testing import CliRunner
 
-from rx.cli.search import search_command
+from rx.cli.trace import trace_command
 
 
 class TestFileChunksMetadata:
@@ -30,7 +30,7 @@ class TestFileChunksMetadata:
 
     def test_file_chunks_present_in_json_output(self):
         """Test that file_chunks field is present in JSON output."""
-        result = self.runner.invoke(search_command, [self.small_file, "content", "--json"])
+        result = self.runner.invoke(trace_command, [self.small_file, "content", "--json"])
 
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -49,7 +49,7 @@ class TestFileChunksMetadata:
 
     def test_file_chunks_small_file_not_chunked(self):
         """Test that small files show num_chunks=1 (not chunked)."""
-        result = self.runner.invoke(search_command, [self.small_file, "line", "--json"])
+        result = self.runner.invoke(trace_command, [self.small_file, "line", "--json"])
 
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -59,7 +59,7 @@ class TestFileChunksMetadata:
 
     def test_file_chunks_with_samples(self):
         """Test that file_chunks works with --samples mode."""
-        result = self.runner.invoke(search_command, [self.small_file, "line", "--samples", "--context", "1", "--json"])
+        result = self.runner.invoke(trace_command, [self.small_file, "line", "--samples", "--context", "1", "--json"])
 
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -76,8 +76,8 @@ class TestFileChunksMetadata:
     def test_file_chunks_consistent_across_searches(self):
         """Test that file_chunks is consistent when searching same file multiple times."""
         # Run search twice on same file
-        result1 = self.runner.invoke(search_command, [self.small_file, "line", "--json"])
-        result2 = self.runner.invoke(search_command, [self.small_file, "content", "--json"])
+        result1 = self.runner.invoke(trace_command, [self.small_file, "line", "--json"])
+        result2 = self.runner.invoke(trace_command, [self.small_file, "content", "--json"])
 
         assert result1.exit_code == 0
         assert result2.exit_code == 0
@@ -96,7 +96,7 @@ class TestFileChunksMetadata:
 
     def test_file_chunks_matches_files_dict(self):
         """Test that file_chunks keys correspond to files dict keys."""
-        result = self.runner.invoke(search_command, [self.small_file, "line", "--json"])
+        result = self.runner.invoke(trace_command, [self.small_file, "line", "--json"])
 
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -109,7 +109,7 @@ class TestFileChunksMetadata:
 
     def test_file_chunks_cli_display_no_chunking(self):
         """Test that CLI output doesn't show chunking info when no files are chunked."""
-        result = self.runner.invoke(search_command, [self.small_file, "line"])
+        result = self.runner.invoke(trace_command, [self.small_file, "line"])
 
         assert result.exit_code == 0
 
@@ -122,7 +122,7 @@ class TestFileChunksMetadata:
 
     def test_file_chunks_data_structure(self):
         """Test the structure and types of file_chunks data."""
-        result = self.runner.invoke(search_command, [self.small_file, "line", "--json"])
+        result = self.runner.invoke(trace_command, [self.small_file, "line", "--json"])
 
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -144,7 +144,7 @@ class TestFileChunksMetadata:
 
     def test_file_chunks_with_no_matches(self):
         """Test that file_chunks is populated even when there are no matches."""
-        result = self.runner.invoke(search_command, [self.small_file, "NONEXISTENT_PATTERN", "--json"])
+        result = self.runner.invoke(trace_command, [self.small_file, "NONEXISTENT_PATTERN", "--json"])
 
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -172,7 +172,7 @@ class TestFileChunksDocumentation:
 
     def test_line_numbers_are_absolute(self):
         """Test that line numbers in output match actual line numbers in file."""
-        result = self.runner.invoke(search_command, [self.test_file, "line 10", "--json"])
+        result = self.runner.invoke(trace_command, [self.test_file, "line 10", "--json"])
 
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -190,9 +190,7 @@ class TestFileChunksDocumentation:
 
     def test_context_line_numbers_are_absolute(self):
         """Test that context line numbers are absolute with --samples."""
-        result = self.runner.invoke(
-            search_command, [self.test_file, "line 10", "--samples", "--context", "2", "--json"]
-        )
+        result = self.runner.invoke(trace_command, [self.test_file, "line 10", "--samples", "--context", "2", "--json"])
 
         assert result.exit_code == 0
         data = json.loads(result.output)

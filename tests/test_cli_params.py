@@ -7,7 +7,7 @@ from pathlib import Path
 
 from click.testing import CliRunner
 
-from rx.cli.search import search_command
+from rx.cli.trace import trace_command
 
 
 class TestCLISamples:
@@ -32,7 +32,7 @@ class TestCLISamples:
 
     def test_samples_basic(self):
         """Test --samples with default context (3 lines)."""
-        result = self.runner.invoke(search_command, [self.test_file, "error", "--samples"])
+        result = self.runner.invoke(trace_command, [self.test_file, "error", "--samples"])
         assert result.exit_code == 0
         assert "Path: " in result.output
         assert "Samples (context: 3 before, 3 after" in result.output
@@ -43,7 +43,7 @@ class TestCLISamples:
 
     def test_samples_with_context(self):
         """Test --samples with custom --context option."""
-        result = self.runner.invoke(search_command, [self.test_file, "error", "--samples", "--context", "1"])
+        result = self.runner.invoke(trace_command, [self.test_file, "error", "--samples", "--context", "1"])
         assert result.exit_code == 0
         assert "Samples (context: 1 before, 1 after" in result.output
         assert "error occurred" in result.output
@@ -51,7 +51,7 @@ class TestCLISamples:
     def test_samples_with_before_after(self):
         """Test --samples with --before and --after options."""
         result = self.runner.invoke(
-            search_command, [self.test_file, "error", "--samples", "--before", "2", "--after", "1"]
+            trace_command, [self.test_file, "error", "--samples", "--before", "2", "--after", "1"]
         )
         assert result.exit_code == 0
         assert "Samples (context: 2 before, 1 after" in result.output
@@ -59,7 +59,7 @@ class TestCLISamples:
 
     def test_samples_with_json(self):
         """Test --samples with --json output."""
-        result = self.runner.invoke(search_command, [self.test_file, "error", "--samples", "--json"])
+        result = self.runner.invoke(trace_command, [self.test_file, "error", "--samples", "--json"])
         assert result.exit_code == 0
 
         # Parse JSON output
@@ -91,7 +91,7 @@ class TestCLISamples:
 
     def test_samples_with_no_color(self):
         """Test --samples with --no-color option."""
-        result = self.runner.invoke(search_command, [self.test_file, "error", "--samples", "--no-color"])
+        result = self.runner.invoke(trace_command, [self.test_file, "error", "--samples", "--no-color"])
         assert result.exit_code == 0
         # Should not contain ANSI color codes
         assert "\033[" not in result.output
@@ -101,7 +101,7 @@ class TestCLISamples:
         """Test that --samples includes colorization by default."""
         # Click's CliRunner doesn't emulate a TTY, so we need to check that
         # colorization works when explicitly enabled (default behavior in actual terminal)
-        result = self.runner.invoke(search_command, [self.test_file, "error", "--samples"])
+        result = self.runner.invoke(trace_command, [self.test_file, "error", "--samples"])
         assert result.exit_code == 0
         # In actual usage, colors would be enabled, but CliRunner disables them
         # So we just verify the output has the expected content
@@ -122,7 +122,7 @@ class TestCLISamples:
         with open(test_file2, "w") as f:
             f.write("Normal\nanother error\nEnd\n")
 
-        result = self.runner.invoke(search_command, [dir_path, "error", "--samples"])
+        result = self.runner.invoke(trace_command, [dir_path, "error", "--samples"])
         assert result.exit_code == 0
         assert "Path: " in result.output
         assert "Pattern: error" in result.output
@@ -140,7 +140,7 @@ class TestCLISamples:
         with open(test_file1, "w") as f:
             f.write("Line 1\nerror in file1\nLine 3\n")
 
-        result = self.runner.invoke(search_command, [dir_path, "error", "--samples", "--json"])
+        result = self.runner.invoke(trace_command, [dir_path, "error", "--samples", "--json"])
         assert result.exit_code == 0
 
         # Parse JSON output
@@ -166,7 +166,7 @@ class TestCLISamples:
 
     def test_samples_with_max_results(self):
         """Test --samples with --max-results to limit matches."""
-        result = self.runner.invoke(search_command, [self.test_file, "error", "--samples", "--max-results", "1"])
+        result = self.runner.invoke(trace_command, [self.test_file, "error", "--samples", "--max-results", "1"])
         assert result.exit_code == 0
         # Should only have one sample section (format: "=== filepath:offset [pattern] ===")
         assert result.output.count("=== ") == 1  # One separator line per sample
@@ -186,25 +186,25 @@ class TestCLIPositionalAndNamedParams:
 
     def test_positional_params(self):
         """Test using positional path and regex parameters."""
-        result = self.runner.invoke(search_command, [self.test_file, "error"])
+        result = self.runner.invoke(trace_command, [self.test_file, "error"])
         assert result.exit_code == 0
         assert "error" in result.output or result.output  # Has some output
 
     def test_named_params(self):
         """Test using --path and --regex named parameters."""
-        result = self.runner.invoke(search_command, ["--path", self.test_file, "--regex", "error"])
+        result = self.runner.invoke(trace_command, ["--path", self.test_file, "--regex", "error"])
         assert result.exit_code == 0
         assert "error" in result.output or result.output
 
     def test_mixed_positional_and_named(self):
         """Test mixing positional and named parameters."""
         # Positional path, named regex
-        result = self.runner.invoke(search_command, [self.test_file, "--regex", "error"])
+        result = self.runner.invoke(trace_command, [self.test_file, "--regex", "error"])
         assert result.exit_code == 0
 
     def test_named_params_with_json(self):
         """Test named parameters with --json output."""
-        result = self.runner.invoke(search_command, ["--path", self.test_file, "--regex", "error", "--json"])
+        result = self.runner.invoke(trace_command, ["--path", self.test_file, "--regex", "error", "--json"])
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert data["path"] == [self.test_file]  # path is now a list
@@ -213,25 +213,25 @@ class TestCLIPositionalAndNamedParams:
 
     def test_file_alias_for_path(self):
         """Test --file as alias for --path."""
-        result = self.runner.invoke(search_command, ["--file", self.test_file, "--regex", "error"])
+        result = self.runner.invoke(trace_command, ["--file", self.test_file, "--regex", "error"])
         assert result.exit_code == 0
         assert "error" in result.output or result.output
 
     def test_regexp_alias_for_regex(self):
         """Test --regexp as alias for --regex."""
-        result = self.runner.invoke(search_command, ["--path", self.test_file, "--regexp", "error"])
+        result = self.runner.invoke(trace_command, ["--path", self.test_file, "--regexp", "error"])
         assert result.exit_code == 0
         assert "error" in result.output or result.output
 
     def test_e_short_option_for_regexp(self):
         """Test -e short option for regex pattern."""
-        result = self.runner.invoke(search_command, ["--path", self.test_file, "-e", "error"])
+        result = self.runner.invoke(trace_command, ["--path", self.test_file, "-e", "error"])
         assert result.exit_code == 0
         assert "error" in result.output or result.output
 
     def test_combined_aliases(self):
         """Test --file and --regexp together."""
-        result = self.runner.invoke(search_command, ["--file", self.test_file, "--regexp", "error", "--json"])
+        result = self.runner.invoke(trace_command, ["--file", self.test_file, "--regexp", "error", "--json"])
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert data["path"] == [self.test_file]  # path is now a list
@@ -240,7 +240,7 @@ class TestCLIPositionalAndNamedParams:
 
     def test_e_with_file_alias(self):
         """Test -e short option with --file alias."""
-        result = self.runner.invoke(search_command, ["--file", self.test_file, "-e", "error"])
+        result = self.runner.invoke(trace_command, ["--file", self.test_file, "-e", "error"])
         assert result.exit_code == 0
         assert "error" in result.output or result.output
 
@@ -259,14 +259,14 @@ class TestCLIMaxResults:
 
     def test_max_results_limits_output(self):
         """Test that --max-results limits the number of matches."""
-        result = self.runner.invoke(search_command, [self.test_file, "error", "--max-results", "3", "--json"])
+        result = self.runner.invoke(trace_command, [self.test_file, "error", "--max-results", "3", "--json"])
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert len(data["matches"]) == 3
 
     def test_max_results_without_limit(self):
         """Test without --max-results returns all matches."""
-        result = self.runner.invoke(search_command, [self.test_file, "error", "--json"])
+        result = self.runner.invoke(trace_command, [self.test_file, "error", "--json"])
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert len(data["matches"]) == 10
@@ -285,7 +285,7 @@ class TestCLIColorization:
 
     def test_colorization_default(self):
         """Test that default output works (colorization only applies to --samples)."""
-        result = self.runner.invoke(search_command, [self.test_file, "error"])
+        result = self.runner.invoke(trace_command, [self.test_file, "error"])
         assert result.exit_code == 0
         # Regular output (without --samples) doesn't have colorization
         assert "Path: " in result.output
@@ -293,7 +293,7 @@ class TestCLIColorization:
 
     def test_colorization_disabled_with_no_color(self):
         """Test that --no-color flag works with --samples."""
-        result = self.runner.invoke(search_command, [self.test_file, "error", "--samples", "--no-color"])
+        result = self.runner.invoke(trace_command, [self.test_file, "error", "--samples", "--no-color"])
         assert result.exit_code == 0
         # Should NOT contain ANSI escape codes
         assert "\033[" not in result.output
@@ -301,7 +301,7 @@ class TestCLIColorization:
 
     def test_colorization_disabled_with_json(self):
         """Test that --json disables colorization."""
-        result = self.runner.invoke(search_command, [self.test_file, "error", "--json"])
+        result = self.runner.invoke(trace_command, [self.test_file, "error", "--json"])
         assert result.exit_code == 0
         # Should NOT contain ANSI escape codes (JSON should be clean)
         assert "\033[" not in result.output
@@ -323,7 +323,7 @@ class TestCLIRipgrepPassthrough:
 
     def test_ignore_case_flag(self):
         """Test -i (ignore case) ripgrep flag passthrough."""
-        result = self.runner.invoke(search_command, [self.test_file, "error", "-i", "--json"])
+        result = self.runner.invoke(trace_command, [self.test_file, "error", "-i", "--json"])
         assert result.exit_code == 0
         data = json.loads(result.output)
         # Should find all three: Error, error, ERROR
@@ -331,7 +331,7 @@ class TestCLIRipgrepPassthrough:
 
     def test_case_sensitive_flag(self):
         """Test --case-sensitive ripgrep flag passthrough."""
-        result = self.runner.invoke(search_command, [self.test_file, "error", "--case-sensitive", "--json"])
+        result = self.runner.invoke(trace_command, [self.test_file, "error", "--case-sensitive", "--json"])
         assert result.exit_code == 0
         data = json.loads(result.output)
         # Should find only lowercase "error"
@@ -339,7 +339,7 @@ class TestCLIRipgrepPassthrough:
 
     def test_default_case_behavior(self):
         """Test default case sensitivity (smart case by default in ripgrep)."""
-        result = self.runner.invoke(search_command, [self.test_file, "error", "--json"])
+        result = self.runner.invoke(trace_command, [self.test_file, "error", "--json"])
         assert result.exit_code == 0
         data = json.loads(result.output)
         # With lowercase pattern, ripgrep uses smart case (case-insensitive)
@@ -353,7 +353,7 @@ class TestCLIRipgrepPassthrough:
         with open(test_file2, "w") as f:
             f.write("error errors error\n")
 
-        result = self.runner.invoke(search_command, [test_file2, "error", "-w", "--json"])
+        result = self.runner.invoke(trace_command, [test_file2, "error", "-w", "--json"])
         assert result.exit_code == 0
         data = json.loads(result.output)
         # -w means word boundary, so "errors" should not match
