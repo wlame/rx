@@ -99,6 +99,7 @@ class TraceResponse(BaseModel):
     """Response from trace endpoint using ID-based structure for multi-pattern support
 
     Attributes:
+        request_id: Unique request identifier (UUID v7, time-sortable)
         path: Path(s) that were searched (list of paths)
         time: Search duration in seconds
         patterns: Mapping of pattern IDs to pattern strings
@@ -113,6 +114,11 @@ class TraceResponse(BaseModel):
         max_results: Maximum number of results requested (None if not specified)
     """
 
+    request_id: str = Field(
+        ...,
+        example="01936c8e-7b2a-7000-8000-000000000001",
+        description="Unique request identifier (UUID v7, time-sortable)",
+    )
     path: list[str] = Field(..., example=["/path/to/dir"], description="List of paths that were searched")
     time: float = Field(..., example=0.123)
     patterns: dict[str, str] = Field(..., example={"p1": "error", "p2": "warning"})
@@ -150,6 +156,12 @@ class TraceResponse(BaseModel):
         RESET = '\033[0m'
 
         lines = []
+
+        # Request ID in grey
+        if colorize:
+            lines.append(f"{GREY}Request ID:{RESET} {self.request_id}")
+        else:
+            lines.append(f"Request ID: {self.request_id}")
 
         # Path(s) in bold cyan - handle single or multiple paths
         path_display = ", ".join(self.path) if len(self.path) > 1 else self.path[0]

@@ -70,6 +70,10 @@ index_cache_misses_total = NoOpMetric()
 index_load_duration_seconds = NoOpMetric()
 index_build_duration_seconds = NoOpMetric()
 
+# Hook metrics
+hook_calls_total = NoOpMetric()
+hook_call_duration_seconds = NoOpMetric()
+
 
 # No-op helper functions
 def record_trace_request(*args, **kwargs):
@@ -97,4 +101,8 @@ def record_error(*args, **kwargs):
 
 
 def record_http_response(*args, **kwargs):
+    pass
+
+
+def record_hook_call(*args, **kwargs):
     pass

@@ -57,6 +57,7 @@ class TestFindMatchForContext:
             Match(pattern="p1", file="f1", offset=200, relative_line_number=10, line_text="warning found"),
         ]
         response = TraceResponse(
+            request_id="test-123",
             path=["/test.txt"],
             time=0.1,
             patterns={"p1": "error"},
@@ -74,6 +75,7 @@ class TestFindMatchForContext:
     def test_returns_none_when_not_found(self):
         """Test returns None when match doesn't exist"""
         response = TraceResponse(
+            request_id="test-123",
             path=["/test.txt"],
             time=0.1,
             patterns={"p1": "error"},
@@ -97,6 +99,7 @@ class TestFindMatchForContext:
             Match(pattern="p1", file="f1", offset=200, relative_line_number=10, line_text="fourth"),
         ]
         response = TraceResponse(
+            request_id="test-123",
             path=["/test.txt"],
             time=0.1,
             patterns={"p1": "error", "p2": "warning"},
@@ -228,6 +231,7 @@ class TestDisplayContextBlock:
             ]
         }
         response = TraceResponse(
+            request_id="test-123",
             path=["/test.txt"],
             time=0.1,
             patterns={"p1": "error"},
@@ -253,6 +257,7 @@ class TestDisplayContextBlock:
     def test_handles_invalid_composite_key(self, mock_echo):
         """Test handles malformed composite key gracefully"""
         response = TraceResponse(
+            request_id="test-123",
             path=["/test.txt"],
             time=0.1,
             patterns={"p1": "error"},
@@ -282,6 +287,7 @@ class TestDisplaySamplesOutput:
     def test_displays_samples_header(self, mock_echo):
         """Test displays header with context info"""
         response = TraceResponse(
+            request_id="test-123",
             path=["/test.txt"],
             time=0.1,
             patterns={"p1": "error"},
@@ -301,6 +307,7 @@ class TestDisplaySamplesOutput:
     def test_displays_no_context_message_when_empty(self, mock_echo):
         """Test shows message when no context available"""
         response = TraceResponse(
+            request_id="test-123",
             path=["/test.txt"],
             time=0.1,
             patterns={"p1": "error"},
@@ -328,6 +335,7 @@ class TestHandleSamplesOutput:
             Match(pattern="p1", file="f1", offset=100, relative_line_number=5, line_text="error found"),
         ]
         response = TraceResponse(
+            request_id="test-123",
             path=["/test.txt"],
             time=0.1,
             patterns={"p1": "error"},
@@ -350,6 +358,7 @@ class TestHandleSamplesOutput:
     def test_calls_display_function_for_cli_output(self, mock_display):
         """Test calls display_samples_output for CLI format"""
         response = TraceResponse(
+            request_id="test-123",
             path=["/test.txt"],
             time=0.1,
             patterns={"p1": "error"},

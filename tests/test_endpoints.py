@@ -6,18 +6,40 @@ import tempfile
 import pytest
 from fastapi.testclient import TestClient
 
+from rx.path_security import set_search_root
 from rx.web import app
 
 
 @pytest.fixture
-def client():
-    """Create test client"""
+def temp_dir():
+    """Create a temporary directory for tests and set it as search root."""
+    tmp_dir = tempfile.mkdtemp()
+    # Resolve symlinks (e.g., /var -> /private/var on macOS) for consistent paths
+    resolved_tmp_dir = os.path.realpath(tmp_dir)
+    # Set environment variable so app lifespan uses our temp directory
+    old_env = os.environ.get('RX_SEARCH_ROOT')
+    os.environ['RX_SEARCH_ROOT'] = resolved_tmp_dir
+    yield resolved_tmp_dir
+    # Cleanup
+    import shutil
+
+    shutil.rmtree(resolved_tmp_dir, ignore_errors=True)
+    # Restore original env var
+    if old_env is not None:
+        os.environ['RX_SEARCH_ROOT'] = old_env
+    elif 'RX_SEARCH_ROOT' in os.environ:
+        del os.environ['RX_SEARCH_ROOT']
+
+
+@pytest.fixture
+def client(temp_dir):
+    """Create test client with search root set to temp directory"""
     with TestClient(app) as c:
         yield c
 
 
 @pytest.fixture
-def temp_test_file():
+def temp_test_file(temp_dir):
     """Create a temporary test file with known content"""
     content = """Line 1: Hello world
 Line 2: Python is awesome
@@ -25,9 +47,9 @@ Line 3: FastAPI rocks
 Line 4: Testing is important
 Line 5: Hello again
 """
-    with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as f:
+    temp_path = os.path.join(temp_dir, 'test_file.txt')
+    with open(temp_path, 'w') as f:
         f.write(content)
-        temp_path = f.name
 
     yield temp_path
 
@@ -194,9 +216,10 @@ class TestTraceEndpoint:
         assert len(data['matches']) == 5
         assert all('pattern' in m and 'file' in m and 'offset' in m for m in data['matches'])
 
-    def test_trace_nonexistent_file(self, client):
+    def test_trace_nonexistent_file(self, client, temp_dir):
         """Test trace endpoint with nonexistent file"""
-        response = client.get('/v1/trace', params={'path': '/nonexistent/file.txt', 'regexp': 'test'})
+        nonexistent = os.path.join(temp_dir, 'nonexistent.txt')
+        response = client.get('/v1/trace', params={'path': nonexistent, 'regexp': 'test'})
         assert response.status_code == 404  # File not found
 
     def test_trace_invalid_regex(self, client, temp_test_file):
@@ -204,12 +227,12 @@ class TestTraceEndpoint:
         response = client.get('/v1/trace', params={'path': temp_test_file, 'regexp': '[invalid'})
         assert response.status_code == 400  # Invalid regex pattern
 
-    def test_trace_binary_file(self, client):
+    def test_trace_binary_file(self, client, temp_dir):
         """Test trace endpoint skips binary files"""
-        # Create a temporary binary file
-        with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix='.bin') as f:
+        # Create a temporary binary file in the temp_dir (within search root)
+        binary_file = os.path.join(temp_dir, 'test.bin')
+        with open(binary_file, 'wb') as f:
             f.write(b'\x00\x01\x02\x03\xff\xfe\xfd')  # Binary data with null bytes
-            binary_file = f.name
 
         try:
             response = client.get('/v1/trace', params={'path': binary_file, 'regexp': 'test'})
@@ -317,9 +340,10 @@ class TestSamplesEndpoint:
         assert response.status_code == 400
         assert 'invalid lines' in response.json()['detail'].lower()
 
-    def test_samples_nonexistent_file(self, client):
+    def test_samples_nonexistent_file(self, client, temp_dir):
         """Test samples endpoint with nonexistent file"""
-        response = client.get('/v1/samples', params={'path': '/nonexistent/file.txt', 'offsets': '0'})
+        nonexistent = os.path.join(temp_dir, 'nonexistent.txt')
+        response = client.get('/v1/samples', params={'path': nonexistent, 'offsets': '0'})
         assert response.status_code == 404
 
     def test_samples_line_beyond_file(self, client, temp_test_file):
@@ -356,11 +380,11 @@ class TestSamplesEndpoint:
         assert '0' in data['offsets']
         assert data['lines'] == {}
 
-    def test_samples_binary_file(self, client):
+    def test_samples_binary_file(self, client, temp_dir):
         """Test samples endpoint with binary file"""
-        with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix='.bin') as f:
+        binary_file = os.path.join(temp_dir, 'test.bin')
+        with open(binary_file, 'wb') as f:
             f.write(b'\x00\x01\x02\x03\xff\xfe\xfd')
-            binary_file = f.name
 
         try:
             response = client.get('/v1/samples', params={'path': binary_file, 'offsets': '0'})

@@ -10,7 +10,9 @@ import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Callable, Optional
 
 from rx.cli import prometheus as prom
 from rx.models import ContextLine, Submatch
@@ -19,6 +21,24 @@ from rx.rg_json import RgContextEvent, RgMatchEvent, parse_rg_json_event
 from rx.utils import NEWLINE_SYMBOL
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class HookCallbacks:
+    """Callbacks for hook events during parsing.
+
+    These callbacks are called synchronously during parsing.
+    The caller is responsible for making them async/non-blocking if needed.
+    """
+
+    on_match_found: Optional[Callable[[dict], None]] = None
+    on_file_scanned: Optional[Callable[[dict], None]] = None
+
+    # Request metadata for hook payloads
+    request_id: str = ""
+    patterns: dict = field(default_factory=dict)  # pattern_id -> pattern string
+    files: dict = field(default_factory=dict)  # file_id -> filepath
+
 
 # Debug mode - creates debug files with full rg commands and output
 DEBUG_MODE = os.getenv('RX_DEBUG', '').lower() in ('1', 'true', 'yes')
@@ -338,6 +358,7 @@ def parse_multiple_files_multipattern_json(
     rg_extra_args: list | None = None,
     context_before: int = 0,
     context_after: int = 0,
+    hooks: Optional[HookCallbacks] = None,
 ) -> tuple[list[dict], dict[str, list[ContextLine]], dict[str, int]]:
     """
     Parse multiple files with multiple patterns using JSON mode and return rich match data.
@@ -350,6 +371,7 @@ def parse_multiple_files_multipattern_json(
         rg_extra_args: Optional list of extra arguments to pass to ripgrep
         context_before: Number of context lines before each match
         context_after: Number of context lines after each match
+        hooks: Optional HookCallbacks for event notifications
 
     Returns:
         Tuple of (matches_list, context_dict, file_chunk_counts)
@@ -403,6 +425,22 @@ def parse_multiple_files_multipattern_json(
     all_context_lines = []
     total_time = 0.0
 
+    # Track per-file statistics for hooks
+    file_stats: dict[str, dict] = {}  # file_id -> {start_time, matches_count, file_size}
+    for file_id, filepath in file_ids.items():
+        try:
+            file_size = os.path.getsize(filepath)
+        except OSError:
+            file_size = 0
+        file_stats[file_id] = {
+            'start_time': time.time(),
+            'matches_count': 0,
+            'file_size': file_size,
+            'filepath': filepath,
+            'tasks_completed': 0,
+            'tasks_total': file_chunk_counts.get(file_id, 1),
+        }
+
     with ThreadPoolExecutor(max_workers=MAX_SUBPROCESSES, thread_name_prefix="WorkerJSON") as executor:
         future_to_task = {
             executor.submit(
@@ -431,22 +469,65 @@ def parse_multiple_files_multipattern_json(
 
                     # Create one match per pattern that matched this line
                     for matching_pattern_id in matching_pattern_ids:
-                        matches.append(
-                            {
-                                'pattern': matching_pattern_id,
-                                'file': file_id,
-                                'offset': match_dict['offset'],
-                                'relative_line_number': match_dict['line_number'],
-                                'line_text': match_dict['line_text'],
-                                'submatches': match_dict['submatches'],
-                            }
-                        )
+                        match_entry = {
+                            'pattern': matching_pattern_id,
+                            'file': file_id,
+                            'offset': match_dict['offset'],
+                            'relative_line_number': match_dict['line_number'],
+                            'line_text': match_dict['line_text'],
+                            'submatches': match_dict['submatches'],
+                        }
+                        matches.append(match_entry)
+
+                        # Update file stats for hook
+                        if file_id in file_stats:
+                            file_stats[file_id]['matches_count'] += 1
+
+                        # Call on_match_found hook if configured
+                        if hooks and hooks.on_match_found:
+                            try:
+                                hooks.on_match_found(
+                                    {
+                                        'request_id': hooks.request_id,
+                                        'file_path': file_stats[file_id]['filepath']
+                                        if file_id in file_stats
+                                        else task.filepath,
+                                        'pattern': pattern_ids.get(matching_pattern_id, matching_pattern_id),
+                                        'offset': match_dict['offset'],
+                                        'line_number': match_dict['line_number'],
+                                    }
+                                )
+                            except Exception as e:
+                                logger.warning(f"[PARSE_JSON] on_match_found hook failed: {e}")
 
                 # Collect context lines with file_id association
                 for ctx_line in context_lines:
                     # Add file_id as metadata for later grouping
                     ctx_line_with_file = (file_id, ctx_line)
                     all_context_lines.append(ctx_line_with_file)
+
+                # Track task completion for file
+                if file_id in file_stats:
+                    file_stats[file_id]['tasks_completed'] += 1
+
+                    # Check if all tasks for this file are complete
+                    stats = file_stats[file_id]
+                    if stats['tasks_completed'] >= stats['tasks_total']:
+                        # Call on_file_scanned hook if configured
+                        if hooks and hooks.on_file_scanned:
+                            scan_time_ms = int((time.time() - stats['start_time']) * 1000)
+                            try:
+                                hooks.on_file_scanned(
+                                    {
+                                        'request_id': hooks.request_id,
+                                        'file_path': stats['filepath'],
+                                        'file_size_bytes': stats['file_size'],
+                                        'scan_time_ms': scan_time_ms,
+                                        'matches_count': stats['matches_count'],
+                                    }
+                                )
+                            except Exception as e:
+                                logger.warning(f"[PARSE_JSON] on_file_scanned hook failed: {e}")
 
                 logger.debug(
                     f"[PARSE_JSON] Task {task.task_id} ({task.filepath}) contributed "
@@ -547,6 +628,7 @@ def parse_paths_json(
     rg_extra_args: list | None = None,
     context_before: int = 0,
     context_after: int = 0,
+    hooks: Optional[HookCallbacks] = None,
 ) -> dict:
     """
     Parse files or directories for multiple regex patterns using JSON mode.
@@ -559,6 +641,7 @@ def parse_paths_json(
         rg_extra_args: Optional list of extra arguments to pass to ripgrep
         context_before: Number of context lines before each match (0 = disabled)
         context_after: Number of context lines after each match (0 = disabled)
+        hooks: Optional HookCallbacks for event notifications
 
     Returns:
         Dictionary with ID-based structure including rich match data and optional context.
@@ -567,6 +650,10 @@ def parse_paths_json(
         rg_extra_args = []
 
     pattern_ids = {f"p{i + 1}": pattern for i, pattern in enumerate(regexps)}
+
+    # Update hooks with pattern info if provided
+    if hooks:
+        hooks.patterns = pattern_ids
     logger.info(f"[PARSE_JSON] Processing {len(pattern_ids)} pattern(s) across {len(paths)} path(s)")
 
     # Collect all files to parse from all provided paths
@@ -613,6 +700,10 @@ def parse_paths_json(
     # Generate file IDs for all files
     file_ids = {f"f{i + 1}": filepath for i, filepath in enumerate(all_files_to_parse)}
 
+    # Update hooks with file info if provided
+    if hooks:
+        hooks.files = file_ids
+
     # Parse all files using JSON-based multi-file approach
     logger.info(f"[PARSE_JSON] Parsing {len(all_files_to_parse)} file(s) with {len(pattern_ids)} pattern(s)")
     matches, context_dict, file_chunk_counts = parse_multiple_files_multipattern_json(
@@ -623,6 +714,7 @@ def parse_paths_json(
         rg_extra_args,
         context_before,
         context_after,
+        hooks,
     )
 
     result = {

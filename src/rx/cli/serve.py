@@ -1,6 +1,8 @@
 """Serve command for web API server"""
 
+import os
 import sys
+
 import click
 
 from rx.utils import get_int_env, get_str_env, setup_shutdown_filter
@@ -9,7 +11,13 @@ from rx.utils import get_int_env, get_str_env, setup_shutdown_filter
 @click.command()
 @click.option('--host', default='127.0.0.1', help='Host to bind to (default: 127.0.0.1)')
 @click.option('--port', default=8000, help='Port to bind to (default: 8000)', type=int)
-def serve_command(host, port):
+@click.option(
+    '--search-root',
+    default=None,
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, resolve_path=True),
+    help='Root directory for all searches (default: current directory). All user paths must be within this directory.',
+)
+def serve_command(host, port, search_root):
     """
     Start the RX web API server.
 
@@ -59,6 +67,15 @@ def serve_command(host, port):
         click.echo("Error: uvicorn is not installed. Install with: pip install uvicorn", err=True)
         raise SystemExit(1)
 
+    # Set up search root before importing web module
+    from rx.path_security import set_search_root
+
+    # Use provided search_root or default to current working directory
+    resolved_root = set_search_root(search_root)
+
+    # Set as environment variable so worker processes inherit it
+    os.environ['RX_SEARCH_ROOT'] = str(resolved_root)
+
     # Import the FastAPI app (this triggers prometheus swap)
     from rx.web import app
 
@@ -81,6 +98,8 @@ def serve_command(host, port):
         click.echo("", err=True)
 
     click.echo(f"Starting RX API server on http://{host}:{port}")
+    click.echo(f"Search root: {resolved_root}")
+    click.echo(f"  All file searches are restricted to this directory.")
     click.echo(f"API docs available at http://{host}:{port}/docs")
     click.echo(f"Metrics available at http://{host}:{port}/metrics")
     click.echo(f"Workers: {workers}, Log level: {log_level.upper()}")

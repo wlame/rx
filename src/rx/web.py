@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import platform
@@ -17,6 +18,17 @@ from rx import parse as parse_module
 from rx import prometheus as prom
 from rx.__version__ import __version__
 from rx.analyse import analyse_path, calculate_regex_complexity
+from rx.hooks import (
+    DISABLE_CUSTOM_HOOKS,
+    HookConfig,
+    build_file_scanned_payload,
+    build_match_found_payload,
+    build_trace_complete_payload,
+    call_hook_async,
+    generate_request_id,
+    get_effective_hooks,
+    get_hook_env_config,
+)
 from rx.models import (
     AnalyseResponse,
     ComplexityResponse,
@@ -26,7 +38,9 @@ from rx.models import (
     TraceResponse,
 )
 from rx.parse import get_context, get_context_by_lines, validate_file
-from rx.parse_json import parse_paths_json
+from rx.parse_json import HookCallbacks, parse_paths_json
+from rx.path_security import get_search_root, set_search_root, validate_path_within_root, validate_paths_within_root
+from rx.request_store import RequestInfo, increment_hook_counter, store_request, update_request
 
 # Replace the noop prometheus in parse module with real one
 parse_module.prom = prom
@@ -40,6 +54,16 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Startup: initialize search root from environment variable
+    # This is set by the serve CLI command, or defaults to cwd
+    search_root_env = os.getenv('RX_SEARCH_ROOT')
+    if search_root_env:
+        search_root = set_search_root(search_root_env)
+    else:
+        search_root = set_search_root(None)  # Defaults to cwd
+    app.state.search_root = search_root
+    logger.info(f"Search root: {search_root}")
+
     # Startup: check for ripgrep
     try:
         rg = sh.Command('rg')
@@ -183,7 +207,7 @@ def get_app_env_variables() -> dict:
     return env_vars
 
 
-@app.get('/', tags=['General'], response_model=HealthResponse)
+@app.get('/', tags=['General'])
 async def health():
     """
     Health check and system introspection endpoint.
@@ -194,6 +218,7 @@ async def health():
     - Application version
     - Operating system information
     - Application-related environment variables
+    - Hook configuration (from environment variables)
     - Documentation URL
     """
     os_info = get_os_info()
@@ -201,13 +226,18 @@ async def health():
     python_packages = get_python_packages()
     constants = get_constants()
     env_vars = get_app_env_variables()
+    hooks_config = get_hook_env_config()
 
     # Record metrics
     prom.record_http_response('GET', '/', 200)
 
+    # Get search root
+    search_root = get_search_root()
+
     return {
         'status': 'ok',
         'ripgrep_available': app.state.rg_path is not None,
+        'search_root': str(search_root) if search_root else None,
         'app_version': __version__,
         'python_version': platform.python_version(),
         'os_info': os_info,
@@ -215,6 +245,7 @@ async def health():
         'python_packages': python_packages,
         'constants': constants,
         'environment': env_vars,
+        'hooks': hooks_config,
         'docs_url': 'https://github.com/wlame/rx',
     }
 
@@ -261,7 +292,29 @@ async def trace(
     regexp: list[str] = Query(
         ..., description="Regular expression patterns to search for (can specify multiple)", examples=["error.*failed"]
     ),
-    max_results: int = Query(None, description="Maximum number of results to return (optional)", ge=1, examples=[100]),
+    max_results: int | None = Query(
+        None, description="Maximum number of results to return (optional)", ge=1, examples=[100]
+    ),
+    request_id: str | None = Query(
+        None,
+        description="Custom request ID (UUID v7 auto-generated if not provided)",
+        examples=["01936c8e-7b2a-7000-8000-000000000001"],
+    ),
+    hook_on_file: str | None = Query(
+        None,
+        description="URL to call (GET) when file scan completes",
+        examples=["https://example.com/hooks/file-scanned"],
+    ),
+    hook_on_match: str | None = Query(
+        None,
+        description="URL to call (GET) for each match found. Requires max_results to be set.",
+        examples=["https://example.com/hooks/match-found"],
+    ),
+    hook_on_complete: str | None = Query(
+        None,
+        description="URL to call (GET) when trace completes",
+        examples=["https://example.com/hooks/trace-complete"],
+    ),
 ) -> TraceResponse:
     """
     Search files or directories for regex pattern matches and return byte offsets with ID-based structure.
@@ -288,10 +341,35 @@ async def trace(
 
     Returns matches where any of the patterns were found across all paths.
     """
+    from datetime import datetime
+
     if not app.state.rg:
         prom.record_error('service_unavailable')
         prom.record_http_response('GET', '/v1/trace', 503)
         raise HTTPException(status_code=503, detail="ripgrep is not available on this system")
+
+    # Validate paths are within search root (security check)
+    try:
+        validated_paths = validate_paths_within_root(path)
+        # Use validated (resolved) paths for actual operations
+        path = [str(p) for p in validated_paths]
+    except PermissionError as e:
+        prom.record_error('access_denied')
+        prom.record_http_response('GET', '/v1/trace', 403)
+        raise HTTPException(status_code=403, detail=str(e))
+
+    # Get effective hook configuration (respects RX_DISABLE_CUSTOM_HOOKS)
+    hooks_config = get_effective_hooks(hook_on_file, hook_on_match, hook_on_complete)
+
+    # Validate: max_results is required when hook_on_match is configured
+    if hooks_config.has_match_hook() and max_results is None:
+        prom.record_error('invalid_params')
+        prom.record_http_response('GET', '/v1/trace', 400)
+        raise HTTPException(
+            status_code=400,
+            detail="max_results is required when hook_on_match is configured. "
+            "This prevents accidentally triggering millions of HTTP calls.",
+        )
 
     # Check if all paths exist
     for p in path:
@@ -299,6 +377,48 @@ async def trace(
             prom.record_error('file_not_found')
             prom.record_http_response('GET', '/v1/trace', 404)
             raise HTTPException(status_code=404, detail=f"Path not found: {p}")
+
+    # Generate or use provided request_id
+    req_id = request_id or generate_request_id()
+
+    # Store request info
+    request_info = RequestInfo(
+        request_id=req_id,
+        paths=path,
+        patterns=regexp,
+        max_results=max_results,
+        started_at=datetime.now(),
+    )
+    store_request(request_info)
+
+    # Get the current event loop to schedule async hook calls from thread pool
+    main_loop = asyncio.get_running_loop()
+
+    # Create hook callbacks for calls during parsing (runs in thread pool)
+    def on_match_callback(payload: dict) -> None:
+        """Callback that schedules async hook on main event loop (non-blocking)."""
+        if hooks_config.on_match_url:
+            # Schedule async hook on main loop - doesn't block the thread
+            main_loop.call_soon_threadsafe(
+                lambda: main_loop.create_task(call_hook_async(hooks_config.on_match_url, payload, 'on_match'))
+            )
+
+    def on_file_callback(payload: dict) -> None:
+        """Callback that schedules async hook on main event loop (non-blocking)."""
+        if hooks_config.on_file_url:
+            # Schedule async hook on main loop - doesn't block the thread
+            main_loop.call_soon_threadsafe(
+                lambda: main_loop.create_task(call_hook_async(hooks_config.on_file_url, payload, 'on_file'))
+            )
+
+    # Build HookCallbacks if any hooks are configured
+    hook_callbacks = None
+    if hooks_config.has_any_hook():
+        hook_callbacks = HookCallbacks(
+            on_match_found=on_match_callback if hooks_config.on_match_url else None,
+            on_file_scanned=on_file_callback if hooks_config.on_file_url else None,
+            request_id=req_id,
+        )
 
     # Parse files or directories with multiple patterns using JSON mode
     try:
@@ -312,6 +432,7 @@ async def trace(
             None,  # rg_extra_args
             0,  # context_before - No context in API by default (use /v1/samples for that)
             0,  # context_after
+            hook_callbacks,  # hooks
         )
         parsing_time = time() - time_before
 
@@ -328,6 +449,30 @@ async def trace(
                 file_size = os.path.getsize(filepath)
                 total_bytes += file_size
                 prom.record_file_size(file_size)
+
+        # Update request info with results
+        update_request(
+            req_id,
+            completed_at=datetime.now(),
+            total_matches=num_matches,
+            total_files_scanned=num_files,
+            total_files_skipped=num_skipped,
+            total_time_ms=int(parsing_time * 1000),
+        )
+
+        # Call on_complete hook if configured (fire and forget - don't block response)
+        if hooks_config.on_complete_url:
+            complete_payload = build_trace_complete_payload(
+                request_id=req_id,
+                paths=path,
+                patterns=regexp,
+                total_files_scanned=num_files,
+                total_files_skipped=num_skipped,
+                total_matches=num_matches,
+                total_time_ms=int(parsing_time * 1000),
+            )
+            # Schedule async hook - don't await, let it run in background
+            asyncio.create_task(call_hook_async(hooks_config.on_complete_url, complete_payload, 'on_complete'))
 
         # Record metrics
         hit_max_results = max_results is not None and num_matches >= max_results
@@ -357,6 +502,7 @@ async def trace(
 
     # Build response using ID-based structure
     response = TraceResponse(
+        request_id=req_id,
         path=path,  # Pass as list directly
         time=parsing_time,
         patterns=result['patterns'],
@@ -472,6 +618,15 @@ async def analyse(
         # Convert single path to list
         paths = path if isinstance(path, list) else [path]
 
+        # Validate paths are within search root (security check)
+        try:
+            validated_paths = validate_paths_within_root(paths)
+            paths = [str(p) for p in validated_paths]
+        except PermissionError as e:
+            prom.record_error('access_denied')
+            prom.record_http_response('GET', '/v1/analyse', 403)
+            raise HTTPException(status_code=403, detail=str(e))
+
         # Check paths exist
         for p in paths:
             if not os.path.exists(p):
@@ -560,6 +715,15 @@ async def samples(
         prom.record_error('service_unavailable')
         prom.record_http_response('GET', '/v1/samples', 503)
         raise HTTPException(status_code=503, detail="ripgrep is not available on this system")
+
+    # Validate path is within search root (security check)
+    try:
+        validated_path = validate_path_within_root(path)
+        path = str(validated_path)
+    except PermissionError as e:
+        prom.record_error('access_denied')
+        prom.record_http_response('GET', '/v1/samples', 403)
+        raise HTTPException(status_code=403, detail=str(e))
 
     # Validate mutual exclusivity of offsets and lines
     if offsets and lines:

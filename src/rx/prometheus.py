@@ -235,6 +235,27 @@ index_build_duration_seconds = Histogram(
 
 
 # ============================================================================
+# Hook Metrics
+# ============================================================================
+
+# Total hook calls by event type and status
+hook_calls_total = Counter(
+    'rx_hook_calls_total',
+    'Total hook calls by event type and status',
+    ['event_type', 'status'],  # event_type: on_file, on_match, on_complete; status: success, failed
+)
+
+# Hook call duration
+hook_call_duration_seconds = Histogram(
+    'rx_hook_call_duration_seconds',
+    'Time spent calling hooks',
+    ['event_type'],
+    buckets=[0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0],
+    # 10ms to 5s - hooks have 3s timeout
+)
+
+
+# ============================================================================
 # Helper Functions
 # ============================================================================
 
@@ -365,3 +386,17 @@ def record_http_response(method: str, endpoint: str, status_code: int):
         status_code: HTTP status code
     """
     http_responses_total.labels(method=method, endpoint=endpoint, status_code=str(status_code)).inc()
+
+
+def record_hook_call(event_type: str, success: bool, duration: float):
+    """
+    Record metrics for a hook call.
+
+    Args:
+        event_type: Type of hook event ('on_file', 'on_match', 'on_complete')
+        success: Whether the hook call succeeded
+        duration: Duration of the hook call in seconds
+    """
+    status = 'success' if success else 'failed'
+    hook_calls_total.labels(event_type=event_type, status=status).inc()
+    hook_call_duration_seconds.labels(event_type=event_type).observe(duration)

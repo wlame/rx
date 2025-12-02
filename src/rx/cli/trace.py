@@ -4,12 +4,22 @@ import json
 import os
 import re
 import sys
+from datetime import datetime
 from time import time
 
 import click
 
+from rx.hooks import (
+    build_file_scanned_payload,
+    build_match_found_payload,
+    build_trace_complete_payload,
+    call_hook_sync,
+    generate_request_id,
+    get_effective_hooks,
+)
 from rx.models import ContextLine, Match, TraceResponse
-from rx.parse_json import parse_paths_json
+from rx.parse_json import HookCallbacks, parse_paths_json
+from rx.request_store import RequestInfo, increment_hook_counter, store_request, update_request
 
 
 def format_context_header(file_val: str, offset_str: str, pattern_val: str, colorize: bool) -> str:
@@ -243,9 +253,29 @@ def handle_samples_output(
 @click.option('--json', 'output_json', is_flag=True, help="Output results as JSON")
 @click.option('--no-color', is_flag=True, help="Disable colored output")
 @click.option('--debug', is_flag=True, help="Enable debug mode (creates .debug_* files)")
+@click.option('--request-id', type=str, help="Custom request ID (auto-generated if not provided)")
+@click.option('--hook-on-file', type=str, help="URL to call (GET) when file scan completes")
+@click.option('--hook-on-match', type=str, help="URL to call (GET) for each match. Requires --max-results.")
+@click.option('--hook-on-complete', type=str, help="URL to call (GET) when trace completes")
 @click.pass_context
 def trace_command(
-    ctx, path_arg, regex_arg, path, regexp, max_results, samples, context, before, after, output_json, no_color, debug
+    ctx,
+    path_arg,
+    regex_arg,
+    path,
+    regexp,
+    max_results,
+    samples,
+    context,
+    before,
+    after,
+    output_json,
+    no_color,
+    debug,
+    request_id,
+    hook_on_file,
+    hook_on_match,
+    hook_on_complete,
 ):
     """
     Trace files and directories for regex patterns using ripgrep.
@@ -307,6 +337,31 @@ def trace_command(
         click.echo("Debug mode enabled - will create .debug_* files", err=True)
 
     if final_paths and final_regexps:
+        # Get effective hook configuration (respects RX_DISABLE_CUSTOM_HOOKS)
+        hooks_config = get_effective_hooks(hook_on_file, hook_on_match, hook_on_complete)
+
+        # Validate: max_results is required when hook_on_match is configured
+        if hooks_config.has_match_hook() and max_results is None:
+            click.echo(
+                "❌ Error: --max-results is required when --hook-on-match is configured.\n"
+                "This prevents accidentally triggering millions of HTTP calls.",
+                err=True,
+            )
+            sys.exit(1)
+
+        # Generate or use provided request_id
+        req_id = request_id or generate_request_id()
+
+        # Store request info
+        request_info = RequestInfo(
+            request_id=req_id,
+            paths=final_paths,
+            patterns=final_regexps,
+            max_results=max_results,
+            started_at=datetime.now(),
+        )
+        store_request(request_info)
+
         # Calculate context parameters if --samples is requested
         if samples:
             before_ctx = before if before is not None else context if context is not None else 3
@@ -314,6 +369,28 @@ def trace_command(
         else:
             before_ctx = 0
             after_ctx = 0
+
+        # Create hook callbacks for synchronous calls during parsing
+        def on_match_callback(payload: dict) -> None:
+            """Synchronous callback for match events."""
+            if hooks_config.on_match_url:
+                success = call_hook_sync(hooks_config.on_match_url, payload, 'on_match')
+                increment_hook_counter(req_id, 'on_match', success)
+
+        def on_file_callback(payload: dict) -> None:
+            """Synchronous callback for file scan events."""
+            if hooks_config.on_file_url:
+                success = call_hook_sync(hooks_config.on_file_url, payload, 'on_file')
+                increment_hook_counter(req_id, 'on_file', success)
+
+        # Build HookCallbacks if any hooks are configured
+        hook_callbacks = None
+        if hooks_config.has_any_hook():
+            hook_callbacks = HookCallbacks(
+                on_match_found=on_match_callback if hooks_config.on_match_url else None,
+                on_file_scanned=on_file_callback if hooks_config.on_file_url else None,
+                request_id=req_id,
+            )
 
         # Parse files or directories for matches using JSON mode
         try:
@@ -325,6 +402,7 @@ def trace_command(
                 rg_extra_args=rg_extra_args,
                 context_before=before_ctx,
                 context_after=after_ctx,
+                hooks=hook_callbacks,
             )
             parsing_time = time() - time_before
 
@@ -336,6 +414,30 @@ def trace_command(
             skipped_files = result['skipped_files']
             context_lines_dict = result.get('context_lines')  # Optional context from ripgrep
             file_chunks = result.get('file_chunks')  # Number of chunks per file
+
+            # Update request info with results
+            update_request(
+                req_id,
+                completed_at=datetime.now(),
+                total_matches=len(matches),
+                total_files_scanned=len(file_ids),
+                total_files_skipped=len(skipped_files),
+                total_time_ms=int(parsing_time * 1000),
+            )
+
+            # Call on_complete hook if configured
+            if hooks_config.on_complete_url:
+                complete_payload = build_trace_complete_payload(
+                    request_id=req_id,
+                    paths=final_paths,
+                    patterns=final_regexps,
+                    total_files_scanned=len(file_ids),
+                    total_files_skipped=len(skipped_files),
+                    total_matches=len(matches),
+                    total_time_ms=int(parsing_time * 1000),
+                )
+                success = call_hook_sync(hooks_config.on_complete_url, complete_payload, 'on_complete')
+                increment_hook_counter(req_id, 'on_complete', success)
 
         except FileNotFoundError as e:
             click.echo(f"❌ Error: {e}", err=True)
@@ -357,6 +459,7 @@ def trace_command(
                 converted_context[key] = ctx_lines
 
         response = TraceResponse(
+            request_id=req_id,
             path=final_paths,  # Pass as list directly
             time=parsing_time,
             patterns=pattern_ids,

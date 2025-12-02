@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -16,18 +17,38 @@ from rx.analyse import (
 )
 from rx.cli.analyse import analyse_command
 from rx.models import AnalyseResponse, FileAnalysisResult
+from rx.path_security import set_search_root
 from rx.web import app
 
 
 @pytest.fixture
-def client():
-    """Create test client"""
+def temp_root():
+    """Create a temporary root directory and set it as search root."""
+    tmp_dir = tempfile.mkdtemp()
+    # Resolve symlinks (e.g., /var -> /private/var on macOS) for consistent paths
+    resolved_tmp_dir = os.path.realpath(tmp_dir)
+    # Set environment variable so app lifespan uses our temp directory
+    old_env = os.environ.get('RX_SEARCH_ROOT')
+    os.environ['RX_SEARCH_ROOT'] = resolved_tmp_dir
+    yield resolved_tmp_dir
+    # Cleanup
+    shutil.rmtree(resolved_tmp_dir, ignore_errors=True)
+    # Restore original env var
+    if old_env is not None:
+        os.environ['RX_SEARCH_ROOT'] = old_env
+    elif 'RX_SEARCH_ROOT' in os.environ:
+        del os.environ['RX_SEARCH_ROOT']
+
+
+@pytest.fixture
+def client(temp_root):
+    """Create test client with search root set to temp directory"""
     with TestClient(app) as c:
         yield c
 
 
 @pytest.fixture
-def temp_text_file():
+def temp_text_file(temp_root):
     """Create a temporary test file with known content"""
     content = """Line 1: Short line
 Line 2: This is a much longer line with more content
@@ -35,9 +56,9 @@ Line 3: Medium length line here
 
 Line 5: After empty line
 """
-    with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as f:
+    temp_path = os.path.join(temp_root, 'test_text.txt')
+    with open(temp_path, 'w') as f:
         f.write(content)
-        temp_path = f.name
 
     yield temp_path
 
@@ -46,10 +67,11 @@ Line 5: After empty line
 
 
 @pytest.fixture
-def temp_empty_file():
+def temp_empty_file(temp_root):
     """Create an empty temporary file"""
-    with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as f:
-        temp_path = f.name
+    temp_path = os.path.join(temp_root, 'empty.txt')
+    with open(temp_path, 'w') as f:
+        pass  # Create empty file
 
     yield temp_path
 
@@ -58,11 +80,11 @@ def temp_empty_file():
 
 
 @pytest.fixture
-def temp_binary_file():
+def temp_binary_file(temp_root):
     """Create a temporary binary file"""
-    with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix='.bin') as f:
+    temp_path = os.path.join(temp_root, 'test.bin')
+    with open(temp_path, 'wb') as f:
         f.write(b'\x00\x01\x02\x03\xff\xfe\xfd')
-        temp_path = f.name
 
     yield temp_path
 
@@ -71,9 +93,10 @@ def temp_binary_file():
 
 
 @pytest.fixture
-def temp_directory(temp_text_file, temp_binary_file):
+def temp_directory(temp_root):
     """Create a temporary directory with mixed files"""
-    temp_dir = tempfile.mkdtemp()
+    temp_dir = os.path.join(temp_root, 'subdir')
+    os.makedirs(temp_dir, exist_ok=True)
 
     # Create a text file in the directory
     text_file = os.path.join(temp_dir, 'test.txt')
@@ -354,9 +377,10 @@ class TestAnalyseEndpoint:
         response = client.get('/v1/analyse', params={'path': temp_text_file, 'max_workers': 5})
         assert response.status_code == 200
 
-    def test_analyse_nonexistent_file(self, client):
+    def test_analyse_nonexistent_file(self, client, temp_root):
         """Test analyzing nonexistent file returns 404"""
-        response = client.get('/v1/analyse', params={'path': '/nonexistent/file.txt'})
+        nonexistent = os.path.join(temp_root, 'nonexistent.txt')
+        response = client.get('/v1/analyse', params={'path': nonexistent})
         assert response.status_code == 404
 
     def test_analyse_directory(self, client, temp_directory):
