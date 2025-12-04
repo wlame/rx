@@ -412,7 +412,7 @@ wheels = [
 ]
 
 [[package]]
-name = "rx-tracer"
+name = "rx-tool"
 version = "1.0.0"
 source = { editable = "." }
 dependencies = [

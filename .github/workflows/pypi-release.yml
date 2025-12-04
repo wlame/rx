@@ -9,17 +9,22 @@ on:
 jobs:
   pypi-publish:
     name: Upload release to PyPI
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/rx-tracer
+      url: https://pypi.org/p/rx-tool
     permissions:
       id-token: write # IMPORTANT: this permission is mandatory for trusted publishing
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
       - name: Install uv
-        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+        uses: astral-sh/setup-uv@v4
 
       - name: Build package
         run: uv build

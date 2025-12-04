@@ -1,9 +1,23 @@
 [project]
-name = "rx-tracer"
+name = "rx-tool"
 version = "1.1.0"
 description = "High-performance file search and analysis tool powered by ripgrep"
 readme = "README.md"
 requires-python = ">=3.13"
+license = {text = "MIT"}
+authors = [{ name = "wlame", email = "wlarne@gmail.com" }]
+keywords = ["regex", "search", "ripgrep", "log-analysis", "file-search", "pattern-matching", "cli", "tool"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Text Processing",
+    "Topic :: Utilities",
+    "Environment :: Console",
+]
 dependencies = [
     "fastapi>=0.118.0",
     "sh>=2.2.2",
@@ -11,7 +25,14 @@ dependencies = [
     "click>=8.1.0",
     "prometheus-client>=0.21.0",
     "psutil>=7.1.2",
+    "httpx>=0.28.1",
 ]
+
+[project.urls]
+Homepage = "https://github.com/wlame/rx"
+Repository = "https://github.com/wlame/rx"
+Issues = "https://github.com/wlame/rx/issues"
+Changelog = "https://github.com/wlame/rx/blob/main/CHANGELOG.md"
 
 [project.scripts]
 rx = "rx.cli.main:cli"

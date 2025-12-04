@@ -24,19 +24,36 @@ If you need to process many files repeatedly, use the API server (`rx serve`) in
 - **Ubuntu/Debian**: `apt install ripgrep`
 - **Windows**: `choco install ripgrep`
 
-## Quick Start
+## Installation
 
-### Install & Run
+### Option 1: Install from PyPI (Recommended)
 
 ```bash
-# With uv (development)
+# Requires Python 3.13+
+pip install rx-tool
+
+# Now use the rx command
+rx /var/log/app.log "error.*"
+rx --version
+```
+
+**Note:** Requires `ripgrep` to be installed separately (see Prerequisites).
+
+### Option 2: Development with uv
+
+```bash
 uv sync
 uv run rx /var/log/app.log "error.*"
+```
 
-# Or build standalone binary
+### Option 3: Standalone Binary
+
+```bash
 ./build.sh
 ./dist/rx /var/log/app.log "error.*"
 ```
+
+## Quick Start
 
 ### Basic Examples
 
