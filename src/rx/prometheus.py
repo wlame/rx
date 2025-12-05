@@ -256,6 +256,36 @@ hook_call_duration_seconds = Histogram(
 
 
 # ============================================================================
+# Trace Cache Metrics
+# ============================================================================
+
+# Trace cache hits and misses
+trace_cache_hits_total = Counter('rx_trace_cache_hits_total', 'Number of trace cache hits')
+
+trace_cache_misses_total = Counter('rx_trace_cache_misses_total', 'Number of trace cache misses')
+
+trace_cache_writes_total = Counter('rx_trace_cache_writes_total', 'Number of trace cache writes')
+
+trace_cache_skip_total = Counter(
+    'rx_trace_cache_skip_total', 'Number of times trace cache was skipped (small file, max_results, etc.)'
+)
+
+# Trace cache load duration
+trace_cache_load_duration_seconds = Histogram(
+    'rx_trace_cache_load_duration_seconds',
+    'Time to load trace cache from disk',
+    buckets=[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0],
+)
+
+# Trace cache reconstruction duration
+trace_cache_reconstruction_seconds = Histogram(
+    'rx_trace_cache_reconstruction_seconds',
+    'Time to reconstruct matches from trace cache',
+    buckets=[0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 30.0],
+)
+
+
+# ============================================================================
 # Helper Functions
 # ============================================================================
 

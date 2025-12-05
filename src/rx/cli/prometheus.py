@@ -74,6 +74,14 @@ index_build_duration_seconds = NoOpMetric()
 hook_calls_total = NoOpMetric()
 hook_call_duration_seconds = NoOpMetric()
 
+# Trace cache metrics
+trace_cache_hits_total = NoOpMetric()
+trace_cache_misses_total = NoOpMetric()
+trace_cache_writes_total = NoOpMetric()
+trace_cache_skip_total = NoOpMetric()
+trace_cache_load_duration_seconds = NoOpMetric()
+trace_cache_reconstruction_seconds = NoOpMetric()
+
 
 # No-op helper functions
 def record_trace_request(*args, **kwargs):

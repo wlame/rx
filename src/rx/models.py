@@ -6,6 +6,39 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
+# Trace Cache Models
+
+
+class TraceCacheMatch(BaseModel):
+    """A single cached match entry.
+
+    Stores the minimal information needed to reconstruct a full match:
+    - pattern_index: Index into the patterns array (0-based)
+    - offset: Absolute byte offset in file where matched line starts
+    - line_number: 1-based line number of the match
+    """
+
+    pattern_index: int = Field(..., description="Index into patterns array (0-based)")
+    offset: int = Field(..., description="Byte offset in file where matched line starts")
+    line_number: int = Field(..., description="Line number (1-based)")
+
+
+class TraceCacheData(BaseModel):
+    """Full trace cache file structure.
+
+    Contains all metadata needed to validate and use cached trace results.
+    """
+
+    version: int = Field(..., description="Cache format version")
+    source_path: str = Field(..., description="Absolute path to source file")
+    source_modified_at: str = Field(..., description="Source file modification time (ISO format)")
+    source_size_bytes: int = Field(..., description="Source file size in bytes")
+    patterns: list[str] = Field(..., description="Regex patterns used for this cache")
+    patterns_hash: str = Field(..., description="Hash of patterns + relevant flags")
+    rg_flags: list[str] = Field(default_factory=list, description="Ripgrep flags that affect matching")
+    created_at: str = Field(..., description="Cache creation time (ISO format)")
+    matches: list[TraceCacheMatch] = Field(default_factory=list, description="Cached match entries")
+
 
 class HealthResponse(BaseModel):
     """Health check response with system introspection data"""

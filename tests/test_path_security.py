@@ -9,10 +9,15 @@ import pytest
 
 from rx.path_security import (
     get_search_root,
+    get_search_roots,
     is_path_within_root,
+    is_path_within_roots,
     set_search_root,
+    set_search_roots,
     validate_path_within_root,
+    validate_path_within_roots,
     validate_paths_within_root,
+    validate_paths_within_roots,
 )
 
 
@@ -98,18 +103,18 @@ class TestValidatePathWithinRoot:
         """Test path with ../ escaping root raises PermissionError."""
         # Try to escape: /root/../etc/passwd
         escape_path = self.root / ".." / "etc" / "passwd"
-        with pytest.raises(PermissionError, match="outside search root"):
+        with pytest.raises(PermissionError, match="outside.*search root"):
             validate_path_within_root(escape_path)
 
     def test_absolute_path_outside_root_raises_error(self):
         """Test absolute path outside root raises PermissionError."""
-        with pytest.raises(PermissionError, match="outside search root"):
+        with pytest.raises(PermissionError, match="outside.*search root"):
             validate_path_within_root("/etc/passwd")
 
     def test_path_outside_root_raises_permission_error(self):
         """Test path outside root raises PermissionError."""
         outside_path = Path("/tmp/outside")
-        with pytest.raises(PermissionError, match="outside search root"):
+        with pytest.raises(PermissionError, match="outside.*search root"):
             validate_path_within_root(outside_path)
 
     def test_symlink_inside_root_to_file_inside_root(self):
@@ -132,7 +137,7 @@ class TestValidatePathWithinRoot:
             link = self.root / "allowed" / "escape_link.txt"
             link.symlink_to(outside_file)
 
-            with pytest.raises(PermissionError, match="outside search root"):
+            with pytest.raises(PermissionError, match="outside.*search root"):
                 validate_path_within_root(link)
         finally:
             outside_file.unlink(missing_ok=True)
@@ -148,7 +153,7 @@ class TestValidatePathWithinRoot:
             link.symlink_to(outside_dir)
 
             # Try to access file through escaped symlink
-            with pytest.raises(PermissionError, match="outside search root"):
+            with pytest.raises(PermissionError, match="outside.*search root"):
                 validate_path_within_root(link / "some_file.txt")
         finally:
             import shutil
@@ -159,7 +164,7 @@ class TestValidatePathWithinRoot:
         """Test multiple ../ escape attempts are blocked."""
         # Try: /root/allowed/subdir/../../../etc/passwd
         escape_path = self.root / "allowed" / "subdir" / ".." / ".." / ".." / "etc" / "passwd"
-        with pytest.raises(PermissionError, match="outside search root"):
+        with pytest.raises(PermissionError, match="outside.*search root"):
             validate_path_within_root(escape_path)
 
     def test_relative_path_resolved_from_root(self):
@@ -170,17 +175,17 @@ class TestValidatePathWithinRoot:
 
     def test_no_search_root_configured_raises_error(self):
         """Test validation without configured search root raises ValueError."""
-        # Temporarily clear search root
+        # Temporarily clear search roots
         import rx.path_security as ps
 
-        original = ps._search_root
-        ps._search_root = None
+        original = ps._search_roots
+        ps._search_roots = []
 
         try:
             with pytest.raises(ValueError, match="Search root not configured"):
                 validate_path_within_root("/some/path")
         finally:
-            ps._search_root = original
+            ps._search_roots = original
 
     def test_custom_search_root_parameter(self):
         """Test using custom search root parameter."""
@@ -192,7 +197,7 @@ class TestValidatePathWithinRoot:
 
         # Should fail with custom root for paths outside it
         outside_custom = self.root / "allowed" / ".." / "other"
-        with pytest.raises(PermissionError, match="outside search root"):
+        with pytest.raises(PermissionError, match="outside.*search root"):
             validate_path_within_root(outside_custom, search_root=custom_root)
 
 
@@ -235,7 +240,7 @@ class TestValidatePathsWithinRoot:
             Path("/etc/passwd"),  # Outside root
             self.root / "file2.txt",
         ]
-        with pytest.raises(PermissionError, match="outside search root"):
+        with pytest.raises(PermissionError, match="outside.*search root"):
             validate_paths_within_root(paths)
 
     def test_empty_list(self):
@@ -337,5 +342,285 @@ class TestEdgeCases:
 
         # Try to escape from deep inside
         escape_path = deep_dir / ".." / ".." / ".." / ".." / ".." / "etc" / "passwd"
-        with pytest.raises(PermissionError, match="outside search root"):
+        with pytest.raises(PermissionError, match="outside.*search root"):
             validate_path_within_root(escape_path)
+
+
+class TestSetSearchRoots:
+    """Tests for set_search_roots function with multiple roots."""
+
+    def test_set_search_roots_with_multiple_directories(self, tmp_path):
+        """Test setting multiple search roots."""
+        root1 = tmp_path / "root1"
+        root2 = tmp_path / "root2"
+        root1.mkdir()
+        root2.mkdir()
+
+        result = set_search_roots([root1, root2])
+        assert len(result) == 2
+        assert root1.resolve() in result
+        assert root2.resolve() in result
+        assert get_search_roots() == result
+
+    def test_set_search_roots_empty_list_uses_cwd(self):
+        """Test setting empty list defaults to cwd."""
+        result = set_search_roots([])
+        assert len(result) == 1
+        assert result[0] == Path.cwd().resolve()
+
+    def test_set_search_roots_with_nonexistent_path(self, tmp_path):
+        """Test setting roots with non-existent path raises ValueError."""
+        valid_root = tmp_path / "valid"
+        valid_root.mkdir()
+        nonexistent = tmp_path / "nonexistent"
+
+        with pytest.raises(ValueError, match="does not exist"):
+            set_search_roots([valid_root, nonexistent])
+
+    def test_set_search_roots_with_file_raises_error(self, tmp_path):
+        """Test setting roots with file raises ValueError."""
+        valid_root = tmp_path / "valid"
+        valid_root.mkdir()
+        file_path = tmp_path / "test.txt"
+        file_path.write_text("test")
+
+        with pytest.raises(ValueError, match="not a directory"):
+            set_search_roots([valid_root, file_path])
+
+    def test_set_search_roots_removes_duplicates(self, tmp_path):
+        """Test that duplicate roots are removed."""
+        root = tmp_path / "root"
+        root.mkdir()
+
+        result = set_search_roots([root, root, root])
+        assert len(result) == 1
+        assert result[0] == root.resolve()
+
+    def test_set_search_roots_resolves_symlinks(self, tmp_path):
+        """Test that search roots resolve symlinks."""
+        real_dir = tmp_path / "real"
+        real_dir.mkdir()
+        link_dir = tmp_path / "link"
+        link_dir.symlink_to(real_dir)
+
+        result = set_search_roots([link_dir])
+        assert len(result) == 1
+        assert result[0] == real_dir.resolve()
+
+    def test_get_search_root_returns_first_root(self, tmp_path):
+        """Test get_search_root returns the first root."""
+        root1 = tmp_path / "root1"
+        root2 = tmp_path / "root2"
+        root1.mkdir()
+        root2.mkdir()
+
+        set_search_roots([root1, root2])
+        assert get_search_root() == root1.resolve()
+
+
+class TestValidatePathWithinMultipleRoots:
+    """Tests for validating paths within multiple search roots."""
+
+    def setup_method(self):
+        """Set up test fixtures with multiple roots."""
+        import shutil
+
+        self.tmp_dir = tempfile.mkdtemp()
+        self.base = Path(self.tmp_dir)
+
+        # Create two separate root directories
+        self.root1 = self.base / "root1"
+        self.root2 = self.base / "root2"
+        self.root1.mkdir()
+        self.root2.mkdir()
+
+        # Create files in each root
+        (self.root1 / "file1.txt").write_text("content1")
+        (self.root1 / "subdir").mkdir()
+        (self.root1 / "subdir" / "nested1.txt").write_text("nested1")
+
+        (self.root2 / "file2.txt").write_text("content2")
+        (self.root2 / "subdir").mkdir()
+        (self.root2 / "subdir" / "nested2.txt").write_text("nested2")
+
+        # Set up multiple search roots
+        set_search_roots([self.root1, self.root2])
+
+    def teardown_method(self):
+        """Clean up test fixtures."""
+        import shutil
+
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_path_in_first_root_is_valid(self):
+        """Test path in first root is accepted."""
+        valid_path = self.root1 / "file1.txt"
+        result = validate_path_within_root(valid_path)
+        assert result == valid_path.resolve()
+
+    def test_path_in_second_root_is_valid(self):
+        """Test path in second root is accepted."""
+        valid_path = self.root2 / "file2.txt"
+        result = validate_path_within_root(valid_path)
+        assert result == valid_path.resolve()
+
+    def test_nested_path_in_first_root_is_valid(self):
+        """Test nested path in first root is accepted."""
+        valid_path = self.root1 / "subdir" / "nested1.txt"
+        result = validate_path_within_root(valid_path)
+        assert result == valid_path.resolve()
+
+    def test_nested_path_in_second_root_is_valid(self):
+        """Test nested path in second root is accepted."""
+        valid_path = self.root2 / "subdir" / "nested2.txt"
+        result = validate_path_within_root(valid_path)
+        assert result == valid_path.resolve()
+
+    def test_path_outside_all_roots_raises_error(self):
+        """Test path outside all roots raises PermissionError."""
+        outside_path = self.base / "outside.txt"
+        with pytest.raises(PermissionError, match="outside all search roots"):
+            validate_path_within_root(outside_path)
+
+    def test_absolute_path_outside_all_roots_raises_error(self):
+        """Test absolute path outside all roots raises PermissionError."""
+        with pytest.raises(PermissionError, match="outside all search roots"):
+            validate_path_within_root("/etc/passwd")
+
+    def test_dot_dot_escape_from_first_root_blocked(self):
+        """Test ../ escape from first root is blocked."""
+        escape_path = self.root1 / ".." / "outside.txt"
+        with pytest.raises(PermissionError, match="outside all search roots"):
+            validate_path_within_root(escape_path)
+
+    def test_dot_dot_within_root_is_valid(self):
+        """Test ../ that stays within a root is valid."""
+        # Path: root1/subdir/../file1.txt -> root1/file1.txt
+        path_with_dots = self.root1 / "subdir" / ".." / "file1.txt"
+        result = validate_path_within_root(path_with_dots)
+        assert result == (self.root1 / "file1.txt").resolve()
+
+    def test_validate_path_within_roots_explicit(self):
+        """Test validate_path_within_roots with explicit roots parameter."""
+        valid_path = self.root1 / "file1.txt"
+        result = validate_path_within_roots(valid_path, search_roots=[self.root1, self.root2])
+        assert result == valid_path.resolve()
+
+    def test_validate_paths_within_roots_multiple_paths(self):
+        """Test validating multiple paths across multiple roots."""
+        paths = [
+            self.root1 / "file1.txt",
+            self.root2 / "file2.txt",
+            self.root1 / "subdir" / "nested1.txt",
+        ]
+        results = validate_paths_within_roots(paths)
+        assert len(results) == 3
+        assert all(isinstance(p, Path) for p in results)
+
+    def test_validate_paths_with_one_invalid_raises_error(self):
+        """Test that one invalid path in list raises PermissionError."""
+        paths = [
+            self.root1 / "file1.txt",
+            Path("/etc/passwd"),  # Outside all roots
+            self.root2 / "file2.txt",
+        ]
+        with pytest.raises(PermissionError, match="outside all search roots"):
+            validate_paths_within_roots(paths)
+
+
+class TestIsPathWithinMultipleRoots:
+    """Tests for is_path_within_roots function."""
+
+    def setup_method(self):
+        """Set up test fixtures."""
+        self.tmp_dir = tempfile.mkdtemp()
+        self.base = Path(self.tmp_dir)
+
+        self.root1 = self.base / "root1"
+        self.root2 = self.base / "root2"
+        self.root1.mkdir()
+        self.root2.mkdir()
+
+        (self.root1 / "file1.txt").write_text("content1")
+        (self.root2 / "file2.txt").write_text("content2")
+
+        set_search_roots([self.root1, self.root2])
+
+    def teardown_method(self):
+        """Clean up test fixtures."""
+        import shutil
+
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_path_in_first_root_returns_true(self):
+        """Test path in first root returns True."""
+        assert is_path_within_root(self.root1 / "file1.txt") is True
+
+    def test_path_in_second_root_returns_true(self):
+        """Test path in second root returns True."""
+        assert is_path_within_root(self.root2 / "file2.txt") is True
+
+    def test_path_outside_all_roots_returns_false(self):
+        """Test path outside all roots returns False."""
+        assert is_path_within_root(self.base / "outside.txt") is False
+
+    def test_is_path_within_roots_with_explicit_roots(self):
+        """Test is_path_within_roots with explicit roots parameter."""
+        assert is_path_within_roots(self.root1 / "file1.txt", search_roots=[self.root1]) is True
+        assert is_path_within_roots(self.root2 / "file2.txt", search_roots=[self.root1]) is False
+
+    def test_escape_attempt_returns_false(self):
+        """Test escape attempt returns False."""
+        assert is_path_within_root(self.root1 / ".." / "outside.txt") is False
+
+
+class TestMultipleRootsSymlinks:
+    """Tests for symlink handling with multiple roots."""
+
+    def setup_method(self):
+        """Set up test fixtures."""
+        self.tmp_dir = tempfile.mkdtemp()
+        self.base = Path(self.tmp_dir)
+
+        self.root1 = self.base / "root1"
+        self.root2 = self.base / "root2"
+        self.outside = self.base / "outside"
+        self.root1.mkdir()
+        self.root2.mkdir()
+        self.outside.mkdir()
+
+        (self.root1 / "file1.txt").write_text("content1")
+        (self.root2 / "file2.txt").write_text("content2")
+        (self.outside / "secret.txt").write_text("secret")
+
+        set_search_roots([self.root1, self.root2])
+
+    def teardown_method(self):
+        """Clean up test fixtures."""
+        import shutil
+
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_symlink_from_root1_to_root2_is_valid(self):
+        """Test symlink from root1 to file in root2 is valid."""
+        link = self.root1 / "link_to_root2.txt"
+        link.symlink_to(self.root2 / "file2.txt")
+
+        result = validate_path_within_root(link)
+        assert result == (self.root2 / "file2.txt").resolve()
+
+    def test_symlink_to_outside_is_blocked(self):
+        """Test symlink pointing outside all roots is blocked."""
+        link = self.root1 / "escape_link.txt"
+        link.symlink_to(self.outside / "secret.txt")
+
+        with pytest.raises(PermissionError, match="outside all search roots"):
+            validate_path_within_root(link)
+
+    def test_symlink_directory_to_outside_is_blocked(self):
+        """Test symlink directory pointing outside all roots is blocked."""
+        link = self.root1 / "escape_dir"
+        link.symlink_to(self.outside)
+
+        with pytest.raises(PermissionError, match="outside all search roots"):
+            validate_path_within_root(link / "secret.txt")

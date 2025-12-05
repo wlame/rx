@@ -16,8 +16,17 @@ from typing import Callable, Optional
 
 from rx.cli import prometheus as prom
 from rx.file_utils import MAX_SUBPROCESSES, FileTask, create_file_tasks, scan_directory_for_text_files, validate_file
+from rx.index import get_large_file_threshold_bytes
 from rx.models import ContextLine, FileScannedPayload, MatchFoundPayload, ParseResult, Submatch
 from rx.rg_json import RgContextEvent, RgMatchEvent, parse_rg_json_event
+from rx.trace_cache import (
+    build_cache_from_matches,
+    get_cached_matches,
+    get_trace_cache_path,
+    reconstruct_match_data,
+    save_trace_cache,
+    should_cache_file,
+)
 from rx.utils import NEWLINE_SYMBOL
 
 logger = logging.getLogger(__name__)
@@ -363,6 +372,10 @@ def parse_multiple_files_multipattern(
     """
     Parse multiple files with multiple patterns and return rich match data.
 
+    This function supports trace caching for large files. When a valid cache exists
+    for a large file, matches are reconstructed from the cache instead of running
+    the dd|rg pipeline. Cache is written for large files after successful complete scans.
+
     Args:
         filepaths: List of file paths
         pattern_ids: Dictionary mapping pattern_id -> pattern
@@ -397,11 +410,35 @@ def parse_multiple_files_multipattern(
     # Create reverse mapping: filepath -> file_id
     filepath_to_id = {v: k for k, v in file_ids.items()}
 
-    # Create tasks from all files and track chunk counts per file
+    # Get patterns list for cache operations
+    patterns_list = list(pattern_ids.values())
+    large_file_threshold = get_large_file_threshold_bytes()
+
+    # Separate files into cache hits and files needing processing
+    files_to_process = []
+    cached_files = []  # (filepath, cached_matches)
+
+    for filepath in filepaths:
+        try:
+            file_size = os.path.getsize(filepath)
+        except OSError:
+            file_size = 0
+
+        # Check cache for large files
+        if file_size >= large_file_threshold:
+            cached_matches = get_cached_matches(filepath, patterns_list, rg_extra_args)
+            if cached_matches is not None:
+                logger.info(f"[PARSE_JSON] Cache hit for {filepath} ({len(cached_matches)} matches)")
+                cached_files.append((filepath, cached_matches, file_size))
+                continue
+
+        files_to_process.append(filepath)
+
+    # Create tasks from files that need processing
     all_tasks = []
     file_chunk_counts = {}  # file_id -> number of chunks/workers
 
-    for filepath in filepaths:
+    for filepath in files_to_process:
         try:
             file_tasks = create_file_tasks(filepath)
             all_tasks.extend(file_tasks)
@@ -415,19 +452,91 @@ def parse_multiple_files_multipattern(
         except Exception as e:
             logger.warning(f"[PARSE_JSON] Skipping {filepath}: {e}")
 
-    logger.info(f"[PARSE_JSON] Created {len(all_tasks)} tasks from {len(filepaths)} files")
+    # Mark cached files with chunk count of 0 (served from cache)
+    for filepath, _, _ in cached_files:
+        file_id = filepath_to_id.get(filepath)
+        if file_id:
+            file_chunk_counts[file_id] = 0  # 0 indicates cache hit
+
+    logger.info(
+        f"[PARSE_JSON] Created {len(all_tasks)} tasks from {len(files_to_process)} files "
+        f"({len(cached_files)} served from cache)"
+    )
 
     # Track parallel tasks created
     prom.parallel_tasks_created.observe(len(all_tasks))
 
-    # Process all tasks with JSON worker
+    # Process cached files first - reconstruct matches
     matches = []
     all_context_lines = []
     total_time = 0.0
 
-    # Track per-file statistics for hooks
-    file_stats: dict[str, dict] = {}  # file_id -> {start_time, matches_count, file_size}
+    for filepath, cached_matches, file_size in cached_files:
+        file_id = filepath_to_id.get(filepath, 'f?')
+        reconstruction_start = time.time()
+
+        for cached_match in cached_matches:
+            try:
+                match_dict, ctx_lines = reconstruct_match_data(
+                    filepath,
+                    cached_match,
+                    patterns_list,
+                    pattern_ids,
+                    file_id,
+                    rg_extra_args,
+                    context_before,
+                    context_after,
+                )
+                matches.append(match_dict)
+
+                # Collect context lines with file_id association
+                for ctx_line in ctx_lines:
+                    all_context_lines.append((file_id, ctx_line))
+
+                # Call on_match_found hook if configured
+                if hooks and hooks.on_match_found:
+                    try:
+                        payload: dict = MatchFoundPayload(
+                            request_id=hooks.request_id,
+                            file_path=filepath,
+                            pattern=patterns_list[cached_match.get('pattern_index', 0)],
+                            offset=cached_match.get('offset', 0),
+                            line_number=cached_match.get('line_number', 0),
+                        ).model_dump()
+                        hooks.on_match_found(payload)
+                    except Exception as e:
+                        logger.warning(f"[PARSE_JSON] on_match_found hook failed: {e}")
+
+            except Exception as e:
+                logger.warning(f"[PARSE_JSON] Failed to reconstruct match from cache: {e}")
+
+        reconstruction_time = time.time() - reconstruction_start
+        prom.trace_cache_reconstruction_seconds.observe(reconstruction_time)
+
+        # Call on_file_scanned hook for cached file
+        if hooks and hooks.on_file_scanned:
+            try:
+                payload = FileScannedPayload(
+                    request_id=hooks.request_id,
+                    file_path=filepath,
+                    file_size_bytes=file_size,
+                    scan_time_ms=int(reconstruction_time * 1000),
+                    matches_count=len(cached_matches),
+                ).model_dump()
+                hooks.on_file_scanned(payload)
+            except Exception as e:
+                logger.warning(f"[PARSE_JSON] on_file_scanned hook failed: {e}")
+
+        # Check max_results after cache reconstruction
+        if max_results and len(matches) >= max_results:
+            logger.info(f"[PARSE_JSON] Reached max_results={max_results} from cache")
+
+    # Track per-file statistics for hooks and caching
+    file_stats: dict[str, dict] = {}  # file_id -> {start_time, matches_count, file_size, ...}
     for file_id, filepath in file_ids.items():
+        # Skip files already served from cache
+        if any(fp == filepath for fp, _, _ in cached_files):
+            continue
         try:
             file_size = os.path.getsize(filepath)
         except OSError:
@@ -439,106 +548,136 @@ def parse_multiple_files_multipattern(
             'filepath': filepath,
             'tasks_completed': 0,
             'tasks_total': file_chunk_counts.get(file_id, 1),
+            'matches_for_cache': [],  # Collect matches for caching
         }
 
-    with ThreadPoolExecutor(max_workers=MAX_SUBPROCESSES, thread_name_prefix="Worker") as executor:
-        future_to_task = {
-            executor.submit(process_task_worker, task, pattern_ids, rg_extra_args, context_before, context_after): task
-            for task in all_tasks
-        }
+    # Track whether max_results was hit (affects caching)
+    max_results_hit = max_results and len(matches) >= max_results
 
-        for future in as_completed(future_to_task):
-            task = future_to_task[future]
+    if all_tasks and not max_results_hit:
+        with ThreadPoolExecutor(max_workers=MAX_SUBPROCESSES, thread_name_prefix="Worker") as executor:
+            future_to_task = {
+                executor.submit(
+                    process_task_worker, task, pattern_ids, rg_extra_args, context_before, context_after
+                ): task
+                for task in all_tasks
+            }
 
-            try:
-                task_result, match_dicts, context_lines, elapsed = future.result()
-                total_time += elapsed
+            for future in as_completed(future_to_task):
+                task = future_to_task[future]
 
-                # Get file_id for this task's filepath
-                file_id = filepath_to_id.get(task.filepath, 'f?')
+                try:
+                    task_result, match_dicts, context_lines, elapsed = future.result()
+                    total_time += elapsed
 
-                # Convert match_dicts to API format
-                # Identify which patterns actually matched (a line may match multiple patterns)
-                for match_dict in match_dicts:
-                    # Determine which patterns matched by analyzing the submatches
-                    matching_pattern_ids = identify_matching_patterns(
-                        match_dict['line_text'], match_dict['submatches'], pattern_ids, rg_extra_args
+                    # Get file_id for this task's filepath
+                    file_id = filepath_to_id.get(task.filepath, 'f?')
+
+                    # Convert match_dicts to API format
+                    # Identify which patterns actually matched (a line may match multiple patterns)
+                    for match_dict in match_dicts:
+                        # Determine which patterns matched by analyzing the submatches
+                        matching_pattern_ids = identify_matching_patterns(
+                            match_dict['line_text'], match_dict['submatches'], pattern_ids, rg_extra_args
+                        )
+
+                        # Create one match per pattern that matched this line
+                        for matching_pattern_id in matching_pattern_ids:
+                            match_entry = {
+                                'pattern': matching_pattern_id,
+                                'file': file_id,
+                                'offset': match_dict['offset'],
+                                'relative_line_number': match_dict['line_number'],
+                                'line_text': match_dict['line_text'],
+                                'submatches': match_dict['submatches'],
+                            }
+                            matches.append(match_entry)
+
+                            # Collect match for caching
+                            if file_id in file_stats:
+                                file_stats[file_id]['matches_for_cache'].append(match_entry)
+                                file_stats[file_id]['matches_count'] += 1
+
+                            # Call on_match_found hook if configured
+                            if hooks and hooks.on_match_found:
+                                try:
+                                    payload: dict = MatchFoundPayload(
+                                        request_id=hooks.request_id,
+                                        file_path=file_stats[file_id]['filepath']
+                                        if file_id in file_stats
+                                        else task.filepath,
+                                        pattern=pattern_ids.get(matching_pattern_id, matching_pattern_id),
+                                        offset=match_dict['offset'],
+                                        line_number=match_dict['line_number'],
+                                    ).model_dump()
+                                    hooks.on_match_found(payload)
+                                except Exception as e:
+                                    logger.warning(f"[PARSE_JSON] on_match_found hook failed: {e}")
+
+                    # Collect context lines with file_id association
+                    for ctx_line in context_lines:
+                        # Add file_id as metadata for later grouping
+                        ctx_line_with_file = (file_id, ctx_line)
+                        all_context_lines.append(ctx_line_with_file)
+
+                    # Track task completion for file
+                    if file_id in file_stats:
+                        file_stats[file_id]['tasks_completed'] += 1
+
+                        # Check if all tasks for this file are complete
+                        stats = file_stats[file_id]
+                        if stats['tasks_completed'] >= stats['tasks_total']:
+                            # Call on_file_scanned hook if configured
+                            if hooks and hooks.on_file_scanned:
+                                scan_time_ms = int((time.time() - stats['start_time']) * 1000)
+                                try:
+                                    payload = FileScannedPayload(
+                                        request_id=hooks.request_id,
+                                        file_path=stats['filepath'],
+                                        file_size_bytes=stats['file_size'],
+                                        scan_time_ms=scan_time_ms,
+                                        matches_count=stats['matches_count'],
+                                    ).model_dump()
+                                    hooks.on_file_scanned(payload)
+                                except Exception as e:
+                                    logger.warning(f"[PARSE_JSON] on_file_scanned hook failed: {e}")
+
+                    logger.debug(
+                        f"[PARSE_JSON] Task {task.task_id} ({task.filepath}) contributed "
+                        f"{len(match_dicts)} matches, {len(context_lines)} context lines"
                     )
 
-                    # Create one match per pattern that matched this line
-                    for matching_pattern_id in matching_pattern_ids:
-                        match_entry = {
-                            'pattern': matching_pattern_id,
-                            'file': file_id,
-                            'offset': match_dict['offset'],
-                            'relative_line_number': match_dict['line_number'],
-                            'line_text': match_dict['line_text'],
-                            'submatches': match_dict['submatches'],
-                        }
-                        matches.append(match_entry)
+                    # Check max_results
+                    if max_results and len(matches) >= max_results:
+                        logger.info(f"[PARSE_JSON] Reached max_results={max_results}, cancelling remaining")
+                        max_results_hit = True
+                        for f in future_to_task:
+                            f.cancel()
+                        break
 
-                        # Update file stats for hook
-                        if file_id in file_stats:
-                            file_stats[file_id]['matches_count'] += 1
+                except Exception as e:
+                    logger.error(f"[PARSE_JSON] Task failed: {e}")
 
-                        # Call on_match_found hook if configured
-                        if hooks and hooks.on_match_found:
-                            try:
-                                payload: dict = MatchFoundPayload(
-                                    request_id=hooks.request_id,
-                                    file_path=file_stats[file_id]['filepath']
-                                    if file_id in file_stats
-                                    else task.filepath,
-                                    pattern=pattern_ids.get(matching_pattern_id, matching_pattern_id),
-                                    offset=match_dict['offset'],
-                                    line_number=match_dict['line_number'],
-                                ).model_dump()
-                                hooks.on_match_found(payload)
-                            except Exception as e:
-                                logger.warning(f"[PARSE_JSON] on_match_found hook failed: {e}")
+    # Write cache for large files that completed successfully
+    # Only cache if: no max_results limit, all tasks completed
+    if max_results is None and not max_results_hit:
+        for file_id, stats in file_stats.items():
+            filepath = stats['filepath']
+            file_size = stats['file_size']
 
-                # Collect context lines with file_id association
-                for ctx_line in context_lines:
-                    # Add file_id as metadata for later grouping
-                    ctx_line_with_file = (file_id, ctx_line)
-                    all_context_lines.append(ctx_line_with_file)
-
-                # Track task completion for file
-                if file_id in file_stats:
-                    file_stats[file_id]['tasks_completed'] += 1
-
-                    # Check if all tasks for this file are complete
-                    stats = file_stats[file_id]
-                    if stats['tasks_completed'] >= stats['tasks_total']:
-                        # Call on_file_scanned hook if configured
-                        if hooks and hooks.on_file_scanned:
-                            scan_time_ms = int((time.time() - stats['start_time']) * 1000)
-                            try:
-                                payload = FileScannedPayload(
-                                    request_id=hooks.request_id,
-                                    file_path=stats['filepath'],
-                                    file_size_bytes=stats['file_size'],
-                                    scan_time_ms=scan_time_ms,
-                                    matches_count=stats['matches_count'],
-                                ).model_dump()
-                                hooks.on_file_scanned(payload)
-                            except Exception as e:
-                                logger.warning(f"[PARSE_JSON] on_file_scanned hook failed: {e}")
-
-                logger.debug(
-                    f"[PARSE_JSON] Task {task.task_id} ({task.filepath}) contributed "
-                    f"{len(match_dicts)} matches, {len(context_lines)} context lines"
+            # Check if this file should be cached
+            if should_cache_file(file_size, max_results, stats['tasks_completed'] >= stats['tasks_total']):
+                cache_data = build_cache_from_matches(
+                    filepath,
+                    patterns_list,
+                    rg_extra_args,
+                    stats['matches_for_cache'],
                 )
-
-                # Check max_results
-                if max_results and len(matches) >= max_results:
-                    logger.info(f"[PARSE_JSON] Reached max_results={max_results}, cancelling remaining")
-                    for f in future_to_task:
-                        f.cancel()
-                    break
-
-            except Exception as e:
-                logger.error(f"[PARSE_JSON] Task failed: {e}")
+                cache_path = get_trace_cache_path(filepath, patterns_list, rg_extra_args)
+                save_trace_cache(cache_data, cache_path)
+                logger.info(
+                    f"[PARSE_JSON] Wrote trace cache for {filepath} ({len(stats['matches_for_cache'])} matches)"
+                )
 
     # Sort matches by file, offset, then pattern
     matches.sort(key=lambda m: (m['file'], m['offset'], m['pattern']))

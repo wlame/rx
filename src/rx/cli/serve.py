@@ -13,11 +13,12 @@ from rx.utils import get_int_env, get_str_env, setup_shutdown_filter
 @click.option('--port', default=8000, help='Port to bind to (default: 8000)', type=int)
 @click.option(
     '--search-root',
-    default=None,
+    'search_roots',
+    multiple=True,
     type=click.Path(exists=True, file_okay=False, dir_okay=True, resolve_path=True),
-    help='Root directory for all searches (default: current directory). All user paths must be within this directory.',
+    help='Root directory for searches (can be specified multiple times). All user paths must be within one of these directories. Default: current directory.',
 )
-def serve_command(host, port, search_root):
+def serve_command(host, port, search_roots):
     """
     Start the RX web API server.
 
@@ -29,6 +30,7 @@ def serve_command(host, port, search_root):
       rx serve
       rx serve --port 8080
       rx serve --host 0.0.0.0 --port 8000
+      rx serve --search-root /var/log --search-root /home/user/data
 
     \b
     Environment Variables:
@@ -67,14 +69,19 @@ def serve_command(host, port, search_root):
         click.echo("Error: uvicorn is not installed. Install with: pip install uvicorn", err=True)
         raise SystemExit(1)
 
-    # Set up search root before importing web module
-    from rx.path_security import set_search_root
+    # Set up search roots before importing web module
+    from rx.path_security import set_search_root, set_search_roots
 
-    # Use provided search_root or default to current working directory
-    resolved_root = set_search_root(search_root)
+    # Use provided search_roots or default to current working directory
+    if search_roots:
+        resolved_roots = set_search_roots(list(search_roots))
+    else:
+        resolved_root = set_search_root(None)
+        resolved_roots = [resolved_root]
 
     # Set as environment variable so worker processes inherit it
-    os.environ['RX_SEARCH_ROOT'] = str(resolved_root)
+    # Use path separator to join multiple roots
+    os.environ['RX_SEARCH_ROOTS'] = os.pathsep.join(str(r) for r in resolved_roots)
 
     # Import the FastAPI app (this triggers prometheus swap)
     from rx.web import app
@@ -98,8 +105,14 @@ def serve_command(host, port, search_root):
         click.echo("", err=True)
 
     click.echo(f"Starting RX API server on http://{host}:{port}")
-    click.echo(f"Search root: {resolved_root}")
-    click.echo(f"  All file searches are restricted to this directory.")
+    if len(resolved_roots) == 1:
+        click.echo(f"Search root: {resolved_roots[0]}")
+        click.echo(f"  All file searches are restricted to this directory.")
+    else:
+        click.echo(f"Search roots ({len(resolved_roots)}):")
+        for root in resolved_roots:
+            click.echo(f"  - {root}")
+        click.echo(f"  All file searches are restricted to these directories.")
     click.echo(f"API docs available at http://{host}:{port}/docs")
     click.echo(f"Metrics available at http://{host}:{port}/metrics")
     click.echo(f"Workers: {workers}, Log level: {log_level.upper()}")

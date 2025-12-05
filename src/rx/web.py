@@ -39,7 +39,14 @@ from rx.models import (
     TraceCompletePayload,
     TraceResponse,
 )
-from rx.path_security import get_search_root, set_search_root, validate_path_within_root, validate_paths_within_root
+from rx.path_security import (
+    get_search_root,
+    get_search_roots,
+    set_search_root,
+    set_search_roots,
+    validate_path_within_root,
+    validate_paths_within_root,
+)
 from rx.request_store import increment_hook_counter, store_request, update_request
 from rx.trace import HookCallbacks, parse_paths
 
@@ -55,15 +62,27 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: initialize search root from environment variable
+    # Startup: initialize search roots from environment variable
     # This is set by the serve CLI command, or defaults to cwd
-    search_root_env = os.getenv('RX_SEARCH_ROOT')
-    if search_root_env:
-        search_root = set_search_root(search_root_env)
+    # Multiple roots are separated by os.pathsep (: on Unix, ; on Windows)
+    search_roots_env = os.getenv('RX_SEARCH_ROOTS')
+    if search_roots_env:
+        roots_list = [r.strip() for r in search_roots_env.split(os.pathsep) if r.strip()]
+        search_roots = set_search_roots(roots_list)
     else:
-        search_root = set_search_root(None)  # Defaults to cwd
-    app.state.search_root = search_root
-    logger.info(f"Search root: {search_root}")
+        # Fall back to single root env var for backwards compatibility
+        search_root_env = os.getenv('RX_SEARCH_ROOT')
+        if search_root_env:
+            search_root = set_search_root(search_root_env)
+            search_roots = [search_root]
+        else:
+            search_root = set_search_root(None)  # Defaults to cwd
+            search_roots = [search_root]
+    app.state.search_roots = search_roots
+    if len(search_roots) == 1:
+        logger.info(f"Search root: {search_roots[0]}")
+    else:
+        logger.info(f"Search roots ({len(search_roots)}): {', '.join(str(r) for r in search_roots)}")
 
     # Startup: check for ripgrep
     try:
@@ -231,13 +250,13 @@ async def health():
     # Record metrics
     prom.record_http_response('GET', '/', 200)
 
-    # Get search root
-    search_root = get_search_root()
+    # Get search roots
+    search_roots = get_search_roots()
 
     return {
         'status': 'ok',
         'ripgrep_available': app.state.rg_path is not None,
-        'search_root': str(search_root) if search_root else None,
+        'search_roots': [str(r) for r in search_roots] if search_roots else None,
         'app_version': __version__,
         'python_version': platform.python_version(),
         'os_info': os_info,
@@ -462,15 +481,15 @@ async def trace(
 
         # Call on_complete hook if configured (fire and forget - don't block response)
         if hooks_config.on_complete_url:
-            complete_payload = build_trace_complete_payload(
+            complete_payload = TraceCompletePayload(
                 request_id=req_id,
-                paths=path,
-                patterns=regexp,
+                paths=','.join(path),
+                patterns=','.join(regexp),
                 total_files_scanned=num_files,
                 total_files_skipped=num_skipped,
                 total_matches=num_matches,
                 total_time_ms=int(parsing_time * 1000),
-            )
+            ).model_dump()
             # Schedule async hook - don't await, let it run in background
             asyncio.create_task(call_hook_async(hooks_config.on_complete_url, complete_payload, 'on_complete'))
 
