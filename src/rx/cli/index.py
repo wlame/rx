@@ -15,6 +15,22 @@ from rx.index import (
     get_large_file_threshold_bytes,
     is_index_valid,
 )
+from rx.seekable_index import (
+    build_index as build_seekable_index,
+)
+from rx.seekable_index import (
+    delete_index as delete_seekable_index,
+)
+from rx.seekable_index import (
+    get_index_info as get_seekable_index_info,
+)
+from rx.seekable_index import (
+    get_index_path as get_seekable_index_path,
+)
+from rx.seekable_index import (
+    is_index_valid as is_seekable_index_valid,
+)
+from rx.seekable_zstd import is_seekable_zstd
 
 
 def human_readable_size(size_bytes: int) -> str:
@@ -83,9 +99,9 @@ def index_command(
                     if os.path.isfile(filepath):
                         files_to_process.append(filepath)
 
-    # Filter to text files only (unless showing info or deleting)
+    # Filter to text files or seekable zstd files (unless showing info or deleting)
     if not info and not delete:
-        files_to_process = [f for f in files_to_process if is_text_file(f)]
+        files_to_process = [f for f in files_to_process if is_text_file(f) or is_seekable_zstd(f)]
 
     if not files_to_process:
         click.echo("No files to process.", err=True)
@@ -95,45 +111,74 @@ def index_command(
 
     for filepath in files_to_process:
         result = {"path": filepath}
+        is_zst = is_seekable_zstd(filepath)
 
         if delete:
             # Delete mode
-            success = delete_index(filepath)
+            if is_zst:
+                success = delete_seekable_index(filepath)
+            else:
+                success = delete_index(filepath)
             result["action"] = "delete"
             result["success"] = success
+            result["type"] = "seekable_zst" if is_zst else "text"
             if not json_output:
                 status = "deleted" if success else "failed"
-                click.echo(f"{filepath}: index {status}")
+                file_type = ".zst" if is_zst else "text"
+                click.echo(f"{filepath} ({file_type}): index {status}")
 
         elif info:
             # Info mode
-            index_info = get_index_info(filepath)
+            if is_zst:
+                index_info = get_seekable_index_info(filepath)
+                result["type"] = "seekable_zst"
+            else:
+                index_info = get_index_info(filepath)
+                result["type"] = "text"
+
             result["action"] = "info"
             if index_info:
                 result["index"] = index_info
                 if not json_output:
-                    click.echo(f"\n{filepath}:")
+                    file_type = ".zst" if is_zst else "text"
+                    click.echo(f"\n{filepath} ({file_type}):")
                     click.echo(f"  Index path: {index_info['index_path']}")
                     click.echo(f"  Valid: {index_info['is_valid']}")
-                    click.echo(f"  Created: {index_info['created_at']}")
-                    click.echo(f"  Source size: {human_readable_size(index_info['source_size_bytes'])}")
-                    click.echo(f"  Index entries: {index_info['index_entries']}")
-                    click.echo(f"  Index step: {human_readable_size(index_info['index_step_bytes'])}")
-                    if index_info.get("analysis"):
-                        analysis = index_info["analysis"]
-                        click.echo(f"  Lines: {analysis.get('line_count', 'N/A'):,}")
-                        click.echo(f"  Line ending: {analysis.get('line_ending', 'N/A')}")
+                    click.echo(f"  Created: {index_info.get('created_at', 'N/A')}")
+
+                    # Get source size (different field names for different types)
+                    source_size = index_info.get('source_zst_size_bytes') or index_info.get('source_size_bytes', 0)
+                    click.echo(f"  Source size: {human_readable_size(source_size)}")
+
+                    if is_zst:
+                        # Seekable zst specific info
+                        click.echo(f"  Frames: {index_info.get('frame_count', 'N/A')}")
+                        click.echo(f"  Total lines: {index_info.get('total_lines', 'N/A'):,}")
+                        click.echo(
+                            f"  Decompressed size: {human_readable_size(index_info.get('decompressed_size_bytes', 0))}"
+                        )
+                    else:
+                        # Regular text file info
+                        click.echo(f"  Index entries: {index_info['index_entries']}")
+                        click.echo(f"  Index step: {human_readable_size(index_info['index_step_bytes'])}")
+                        if index_info.get("analysis"):
+                            analysis = index_info["analysis"]
+                            click.echo(f"  Lines: {analysis.get('line_count', 'N/A'):,}")
+                            click.echo(f"  Line ending: {analysis.get('line_ending', 'N/A')}")
             else:
                 result["index"] = None
                 if not json_output:
-                    click.echo(f"\n{filepath}: no index exists")
+                    file_type = ".zst" if is_zst else "text"
+                    click.echo(f"\n{filepath} ({file_type}): no index exists")
 
         else:
             # Index/rebuild mode
             file_size = os.path.getsize(filepath)
+            result["type"] = "seekable_zst" if is_zst else "text"
 
             # Check if file meets threshold (unless forcing specific file)
-            if file_size < threshold_bytes and len(paths) > 1:
+            # Skip threshold check for .zst files (they're always indexed)
+            if not is_zst and file_size < threshold_bytes and len(paths) > 1:
                 result["action"] = "skipped"
                 result["reason"] = f"File size ({human_readable_size(file_size)}) below threshold"
                 if not json_output:
@@ -142,32 +187,53 @@ def index_command(
                 continue
 
             # Check if valid index exists (unless forcing)
-            if not force and is_index_valid(filepath):
+            has_valid_index = is_seekable_index_valid(filepath) if is_zst else is_index_valid(filepath)
+            if not force and has_valid_index:
                 result["action"] = "exists"
                 result["valid"] = True
                 if not json_output:
-                    click.echo(f"{filepath}: valid index exists (use --force to rebuild)")
+                    file_type = ".zst" if is_zst else "text"
+                    click.echo(f"{filepath} ({file_type}): valid index exists (use --force to rebuild)")
                 results.append(result)
                 continue
 
             # Build index
             if not json_output:
-                click.echo(f"{filepath}: building index...", nl=False)
+                file_type = ".zst" if is_zst else "text"
+                click.echo(f"{filepath} ({file_type}): building index...", nl=False)
 
-            index_data = create_index_file(filepath, force=force)
-
-            if index_data:
-                result["action"] = "created"
-                result["success"] = True
-                result["index_path"] = str(get_index_path(filepath))
-                result["index_entries"] = len(index_data.get("line_index", []))
-                if not json_output:
-                    click.echo(f" done ({result['index_entries']} entries)")
+            if is_zst:
+                # Build seekable zst index
+                try:
+                    index = build_seekable_index(filepath)
+                    result["action"] = "created"
+                    result["success"] = True
+                    result["index_path"] = str(get_seekable_index_path(filepath))
+                    result["frame_count"] = index.frame_count
+                    result["total_lines"] = index.total_lines
+                    if not json_output:
+                        click.echo(f" done ({index.frame_count} frames, {index.total_lines:,} lines)")
+                except Exception as e:
+                    result["action"] = "failed"
+                    result["success"] = False
+                    result["error"] = str(e)
+                    if not json_output:
+                        click.echo(f" failed: {e}")
             else:
-                result["action"] = "failed"
-                result["success"] = False
-                if not json_output:
-                    click.echo(" failed")
+                # Build regular text file index
+                index_data = create_index_file(filepath, force=force)
+                if index_data:
+                    result["action"] = "created"
+                    result["success"] = True
+                    result["index_path"] = str(get_index_path(filepath))
+                    result["index_entries"] = len(index_data.get("line_index", []))
+                    if not json_output:
+                        click.echo(f" done ({result['index_entries']} entries)")
+                else:
+                    result["action"] = "failed"
+                    result["success"] = False
+                    if not json_output:
+                        click.echo(" failed")
 
         results.append(result)
 

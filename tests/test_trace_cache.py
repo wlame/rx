@@ -721,3 +721,311 @@ class TestEdgeCases:
         # Should produce consistent results
         hash_result2 = compute_patterns_hash(patterns, [])
         assert hash_result == hash_result2
+
+
+class TestCompressedFileCaching:
+    """Tests for compressed file caching functionality."""
+
+    def test_build_cache_with_compression_format(self, temp_text_file):
+        """Test that compression_format is included in cache data."""
+        patterns = ["ERROR"]
+        matches = [
+            {"pattern": "p1", "offset": 0, "relative_line_number": 1, "frame_index": 0},
+            {"pattern": "p1", "offset": 100, "relative_line_number": 5, "frame_index": 1},
+        ]
+
+        cache_data = build_cache_from_matches(
+            temp_text_file,
+            patterns,
+            [],
+            matches,
+            compression_format="zstd-seekable",
+        )
+
+        assert cache_data["compression_format"] == "zstd-seekable"
+        assert "frames_with_matches" in cache_data
+        assert sorted(cache_data["frames_with_matches"]) == [0, 1]
+
+    def test_build_cache_without_compression_format(self, temp_text_file):
+        """Test that compression_format is omitted for regular files."""
+        patterns = ["ERROR"]
+        matches = [
+            {"pattern": "p1", "offset": 0, "relative_line_number": 1},
+        ]
+
+        cache_data = build_cache_from_matches(
+            temp_text_file,
+            patterns,
+            [],
+            matches,
+        )
+
+        assert "compression_format" not in cache_data
+        assert "frames_with_matches" not in cache_data
+
+    def test_frame_index_preserved_in_cache(self, temp_text_file):
+        """Test that frame_index is stored in cached matches."""
+        patterns = ["ERROR"]
+        matches = [
+            {"pattern": "p1", "offset": 0, "relative_line_number": 1, "frame_index": 2},
+            {"pattern": "p1", "offset": 100, "relative_line_number": 5, "frame_index": 2},
+            {"pattern": "p1", "offset": 200, "relative_line_number": 10, "frame_index": 5},
+        ]
+
+        cache_data = build_cache_from_matches(
+            temp_text_file,
+            patterns,
+            [],
+            matches,
+            compression_format="zstd-seekable",
+        )
+
+        # Check that frame_index is preserved
+        cached_matches = cache_data["matches"]
+        assert len(cached_matches) == 3
+        assert cached_matches[0]["frame_index"] == 2
+        assert cached_matches[1]["frame_index"] == 2
+        assert cached_matches[2]["frame_index"] == 5
+
+        # Check frames_with_matches
+        assert sorted(cache_data["frames_with_matches"]) == [2, 5]
+
+    def test_frames_with_matches_deduplication(self, temp_text_file):
+        """Test that frames_with_matches contains unique frame indices."""
+        patterns = ["ERROR"]
+        # Multiple matches in the same frame
+        matches = [{"pattern": "p1", "offset": i * 100, "relative_line_number": i, "frame_index": 0} for i in range(10)]
+
+        cache_data = build_cache_from_matches(
+            temp_text_file,
+            patterns,
+            [],
+            matches,
+            compression_format="zstd-seekable",
+        )
+
+        # Should only have frame 0 once
+        assert cache_data["frames_with_matches"] == [0]
+
+    def test_cache_version_updated(self, temp_text_file):
+        """Test that cache version is 2 for compressed file support."""
+        assert TRACE_CACHE_VERSION == 2
+
+        patterns = ["ERROR"]
+        matches = [{"pattern": "p1", "offset": 0, "relative_line_number": 1}]
+
+        cache_data = build_cache_from_matches(temp_text_file, patterns, [], matches)
+        assert cache_data["version"] == 2
+
+
+class TestCompressedCacheHelpers:
+    """Tests for compressed cache helper functions."""
+
+    def test_should_cache_compressed_file_size_threshold(self):
+        """Test compressed file size threshold (1MB)."""
+        from rx.trace_cache import should_cache_compressed_file
+
+        # Below threshold (1MB)
+        assert should_cache_compressed_file(500_000, None, True) is False
+
+        # Above threshold
+        assert should_cache_compressed_file(2_000_000, None, True) is True
+
+    def test_should_cache_compressed_file_max_results(self):
+        """Test that max_results prevents caching."""
+        from rx.trace_cache import should_cache_compressed_file
+
+        # With max_results set, should not cache
+        assert should_cache_compressed_file(2_000_000, 100, True) is False
+
+        # Without max_results, should cache
+        assert should_cache_compressed_file(2_000_000, None, True) is True
+
+    def test_should_cache_compressed_file_incomplete_scan(self):
+        """Test that incomplete scans are not cached."""
+        from rx.trace_cache import should_cache_compressed_file
+
+        # Incomplete scan
+        assert should_cache_compressed_file(2_000_000, None, False) is False
+
+        # Complete scan
+        assert should_cache_compressed_file(2_000_000, None, True) is True
+
+    def test_get_compressed_cache_info_no_cache(self, temp_text_file):
+        """Test get_compressed_cache_info returns None when no cache exists."""
+        from rx.trace_cache import get_compressed_cache_info
+
+        result = get_compressed_cache_info(temp_text_file, ["ERROR"], [])
+        assert result is None
+
+    def test_get_compressed_cache_info_with_cache(self, temp_text_file):
+        """Test get_compressed_cache_info returns correct data."""
+        from rx.trace_cache import get_compressed_cache_info
+
+        patterns = ["ERROR"]
+        matches = [
+            {"pattern": "p1", "offset": 0, "relative_line_number": 1, "frame_index": 0},
+            {"pattern": "p1", "offset": 100, "relative_line_number": 5, "frame_index": 2},
+        ]
+
+        # Create cache
+        cache_data = build_cache_from_matches(
+            temp_text_file,
+            patterns,
+            [],
+            matches,
+            compression_format="zstd-seekable",
+        )
+        cache_path = get_trace_cache_path(temp_text_file, patterns, [])
+        save_trace_cache(cache_data, cache_path)
+
+        # Retrieve cache info
+        info = get_compressed_cache_info(temp_text_file, patterns, [])
+        assert info is not None
+        assert info["compression_format"] == "zstd-seekable"
+        assert info["frames_with_matches"] == [0, 2]
+        assert info["match_count"] == 2
+        assert len(info["matches"]) == 2
+
+        # Cleanup
+        delete_trace_cache(temp_text_file, patterns, [])
+
+
+class TestSeekableZstdCacheReconstruction:
+    """Tests for seekable zstd cache reconstruction functions."""
+
+    def test_reconstruct_seekable_zstd_match_basic(self, temp_text_file):
+        """Test basic match reconstruction from cached data."""
+        from rx.trace_cache import reconstruct_seekable_zstd_match
+
+        patterns = ["ERROR"]
+        pattern_ids = {"p1": "ERROR"}
+        cached_match = {
+            "pattern_index": 0,
+            "offset": 0,
+            "line_number": 1,
+            "frame_index": 0,
+        }
+
+        # Create mock decompressed frame data
+        frame_content = b"Line 1: ERROR in first line\nLine 2: Normal content\nLine 3: More content\n"
+        decompressed_frames = {0: frame_content}
+        frame_line_offsets = {0: 1}
+
+        match_dict, context_lines = reconstruct_seekable_zstd_match(
+            temp_text_file,
+            cached_match,
+            patterns,
+            pattern_ids,
+            "f1",
+            [],
+            decompressed_frames,
+            frame_line_offsets,
+            context_before=0,
+            context_after=0,
+        )
+
+        assert match_dict["pattern"] == "p1"
+        assert match_dict["file"] == "f1"
+        assert match_dict["offset"] == 0
+        assert match_dict["relative_line_number"] == 1
+        assert "ERROR" in match_dict["line_text"]
+        assert match_dict["is_compressed"] is True
+        assert match_dict["is_seekable_zstd"] is True
+
+    def test_reconstruct_seekable_zstd_match_with_context(self, temp_text_file):
+        """Test match reconstruction with context lines."""
+        from rx.trace_cache import reconstruct_seekable_zstd_match
+
+        patterns = ["ERROR"]
+        pattern_ids = {"p1": "ERROR"}
+        cached_match = {
+            "pattern_index": 0,
+            "offset": 50,
+            "line_number": 3,
+            "frame_index": 0,
+        }
+
+        # Create mock decompressed frame data with multiple lines
+        frame_content = b"Line 1: Before\nLine 2: Before too\nLine 3: ERROR here\nLine 4: After\nLine 5: After too\n"
+        decompressed_frames = {0: frame_content}
+        frame_line_offsets = {0: 1}
+
+        match_dict, context_lines = reconstruct_seekable_zstd_match(
+            temp_text_file,
+            cached_match,
+            patterns,
+            pattern_ids,
+            "f1",
+            [],
+            decompressed_frames,
+            frame_line_offsets,
+            context_before=2,
+            context_after=2,
+        )
+
+        assert match_dict["relative_line_number"] == 3
+        assert "ERROR" in match_dict["line_text"]
+        assert len(context_lines) == 5  # 2 before + 1 match + 2 after
+
+    def test_reconstruct_seekable_zstd_match_extracts_submatches(self, temp_text_file):
+        """Test that submatches are extracted correctly."""
+        from rx.trace_cache import reconstruct_seekable_zstd_match
+
+        patterns = ["ERROR"]
+        pattern_ids = {"p1": "ERROR"}
+        cached_match = {
+            "pattern_index": 0,
+            "offset": 0,
+            "line_number": 1,
+            "frame_index": 0,
+        }
+
+        frame_content = b"This line has ERROR in it\n"
+        decompressed_frames = {0: frame_content}
+        frame_line_offsets = {0: 1}
+
+        match_dict, _ = reconstruct_seekable_zstd_match(
+            temp_text_file,
+            cached_match,
+            patterns,
+            pattern_ids,
+            "f1",
+            [],
+            decompressed_frames,
+            frame_line_offsets,
+        )
+
+        assert len(match_dict["submatches"]) == 1
+        assert match_dict["submatches"][0].text == "ERROR"
+
+    def test_reconstruct_seekable_zstd_match_case_insensitive(self, temp_text_file):
+        """Test case insensitive pattern matching in reconstruction."""
+        from rx.trace_cache import reconstruct_seekable_zstd_match
+
+        patterns = ["error"]
+        pattern_ids = {"p1": "error"}
+        cached_match = {
+            "pattern_index": 0,
+            "offset": 0,
+            "line_number": 1,
+            "frame_index": 0,
+        }
+
+        frame_content = b"This line has ERROR in it\n"
+        decompressed_frames = {0: frame_content}
+        frame_line_offsets = {0: 1}
+
+        match_dict, _ = reconstruct_seekable_zstd_match(
+            temp_text_file,
+            cached_match,
+            patterns,
+            pattern_ids,
+            "f1",
+            ["-i"],  # Case insensitive flag
+            decompressed_frames,
+            frame_line_offsets,
+        )
+
+        assert len(match_dict["submatches"]) == 1
+        assert match_dict["submatches"][0].text == "ERROR"

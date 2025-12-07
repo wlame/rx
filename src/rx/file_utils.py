@@ -11,6 +11,8 @@ from dataclasses import dataclass
 # Import noop prometheus stub by default (CLI mode)
 # Real prometheus is only imported in web.py for server mode
 from rx.cli import prometheus as prom
+from rx.seekable_index import find_frame_for_line, get_or_build_index
+from rx.seekable_zstd import decompress_frame, is_seekable_zstd
 from rx.utils import NEWLINE_SYMBOL, NEWLINE_SYMBOL_BYTES
 
 logger = logging.getLogger(__name__)
@@ -90,11 +92,22 @@ def scan_directory_for_text_files(dirpath: str, max_files: int = MAX_FILES) -> t
 
 
 def validate_file(filepath: str) -> None:
+    """Validate that a file exists and is processable (text or supported compressed format)."""
+    from rx.compression import is_compressed
+
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"File not found: {filepath}")
 
     if not os.path.isfile(filepath):
         raise ValueError(f"Path is not a file: {filepath}")
+
+    # Accept compressed files (they appear binary but are processable)
+    if is_compressed(filepath):
+        return
+
+    # Accept seekable zstd files
+    if is_seekable_zstd(filepath):
+        return
 
     if not is_text_file(filepath):
         raise ValueError("File appears to be binary, not text")
@@ -912,5 +925,149 @@ def _get_context_by_lines_simple(
 
         context_lines = [line.rstrip(NEWLINE_SYMBOL + "\r") for line in all_lines[start_idx:end_idx]]
         result[target_line] = context_lines
+
+    return result
+
+
+def get_context_from_seekable_zstd(
+    filepath: str,
+    line_numbers: list[int],
+    before_context: int = 3,
+    after_context: int = 3,
+) -> dict[int, list[str]]:
+    """
+    Get lines of context around specified line numbers from a seekable zstd file.
+
+    This function efficiently retrieves context by:
+    1. Looking up which frames contain the requested lines
+    2. Decompressing only the necessary frames
+    3. Extracting the requested lines with context
+
+    Args:
+        filepath: Path to the seekable zstd file
+        line_numbers: List of 1-based line numbers to get context for
+        before_context: Number of lines before each target line (default: 3)
+        after_context: Number of lines after each target line (default: 3)
+
+    Returns:
+        Dictionary mapping each line number to list of context lines
+
+    Raises:
+        ValueError: If file is not a seekable zstd or parameters are invalid
+    """
+    if not is_seekable_zstd(filepath):
+        raise ValueError(f"Not a seekable zstd file: {filepath}")
+
+    if before_context < 0 or after_context < 0:
+        raise ValueError("Context values must be non-negative")
+
+    # Get or build the index
+    index = get_or_build_index(filepath)
+
+    result: dict[int, list[str]] = {}
+
+    # Group requested lines by frame to minimize decompression
+    from collections import defaultdict
+
+    lines_by_frame: dict[int, list[int]] = defaultdict(list)
+
+    for line_num in line_numbers:
+        if line_num < 1 or line_num > index.total_lines:
+            result[line_num] = []
+            continue
+
+        # Find which frame contains this line
+        frame_idx = find_frame_for_line(index, line_num)
+        lines_by_frame[frame_idx].append(line_num)
+
+    # Also include frames needed for context lines
+    # This is an optimization - we might need adjacent frames for context
+    expanded_frames: set[int] = set()
+    for frame_idx, target_lines in lines_by_frame.items():
+        expanded_frames.add(frame_idx)
+
+        # Check if we need previous frame for before_context
+        if before_context > 0:
+            for line_num in target_lines:
+                start_line = max(1, line_num - before_context)
+                if start_line < index.frames[frame_idx].first_line and frame_idx > 0:
+                    expanded_frames.add(frame_idx - 1)
+
+        # Check if we need next frame for after_context
+        if after_context > 0:
+            for line_num in target_lines:
+                end_line = line_num + after_context
+                if end_line > index.frames[frame_idx].last_line and frame_idx < index.frame_count - 1:
+                    expanded_frames.add(frame_idx + 1)
+
+    # Decompress needed frames and cache their lines
+    frame_lines_cache: dict[int, list[str]] = {}
+
+    for frame_idx in sorted(expanded_frames):
+        try:
+            frame_data = decompress_frame(filepath, frame_idx)
+            decoded = frame_data.decode("utf-8", errors="replace")
+
+            # Split on \n only
+            if '\n' in decoded:
+                parts = decoded.split('\n')
+                lines = [parts[i] + '\n' for i in range(len(parts) - 1)]
+                if parts[-1]:
+                    lines.append(parts[-1])
+            else:
+                lines = [decoded] if decoded else []
+
+            frame_lines_cache[frame_idx] = lines
+
+            logger.debug(f"[SEEKABLE_CONTEXT] Decompressed frame {frame_idx}: {len(lines)} lines")
+
+        except Exception as e:
+            logger.error(f"[SEEKABLE_CONTEXT] Failed to decompress frame {frame_idx}: {e}")
+            frame_lines_cache[frame_idx] = []
+
+    # Now extract context for each requested line
+    for line_num in line_numbers:
+        if line_num < 1 or line_num > index.total_lines:
+            continue  # Already set to empty above
+
+        try:
+            # Find frame containing this line
+            frame_idx = find_frame_for_line(index, line_num)
+            frame_info = index.frames[frame_idx]
+
+            # Calculate context window
+            start_line = max(1, line_num - before_context)
+            end_line = min(index.total_lines, line_num + after_context)
+
+            context_lines = []
+
+            # Iterate through lines in the context window
+            current_line = start_line
+            while current_line <= end_line:
+                # Find which frame contains this line
+                ctx_frame_idx = find_frame_for_line(index, current_line)
+                ctx_frame_info = index.frames[ctx_frame_idx]
+
+                if ctx_frame_idx not in frame_lines_cache:
+                    # Frame not cached (shouldn't happen with expanded_frames logic)
+                    current_line += 1
+                    continue
+
+                frame_lines = frame_lines_cache[ctx_frame_idx]
+
+                # Calculate index within the frame
+                line_in_frame = current_line - ctx_frame_info.first_line
+
+                if 0 <= line_in_frame < len(frame_lines):
+                    line_text = frame_lines[line_in_frame].rstrip(NEWLINE_SYMBOL + "\r")
+                    context_lines.append(line_text)
+
+                current_line += 1
+
+            result[line_num] = context_lines
+
+        except Exception as e:
+            logger.error(f"[SEEKABLE_CONTEXT] Failed to get context for line {line_num}: {e}")
+            result[line_num] = []
 
     return result

@@ -7,9 +7,15 @@ Cache files are stored in ~/.cache/rx/trace_cache/ and contain:
 - Source file metadata (path, size, modification time)
 - Patterns and flags used for the search
 - Match results (pattern index, byte offset, line number)
+- For compressed files: compression format and frame indices
 
 Cache is only written for complete scans (no max_results truncation) on
 files >= get_large_file_threshold_bytes().
+
+Compressed File Support:
+- Seekable zstd files store frame_index with each match
+- frames_with_matches provides quick lookup of which frames to decompress
+- On cache hit, only frames with matches are decompressed for reconstruction
 """
 
 import hashlib
@@ -31,7 +37,7 @@ from rx.utils import get_int_env
 logger = logging.getLogger(__name__)
 
 # Constants
-TRACE_CACHE_VERSION = 1
+TRACE_CACHE_VERSION = 2  # Bumped for compressed file support
 TRACE_CACHE_DIR_NAME = "rx/trace_cache"
 
 # Flags that affect matching and must be part of cache key
@@ -255,6 +261,7 @@ def build_cache_from_matches(
     patterns: list[str],
     rg_flags: list[str],
     matches: list[dict],
+    compression_format: str | None = None,
 ) -> dict:
     """Build a cache data structure from match results.
 
@@ -263,6 +270,7 @@ def build_cache_from_matches(
         patterns: List of regex patterns
         rg_flags: List of ripgrep flags
         matches: List of match dicts from trace processing
+        compression_format: Optional compression format (e.g., 'zstd-seekable', 'gzip')
 
     Returns:
         Cache data dictionary ready to be saved
@@ -276,22 +284,30 @@ def build_cache_from_matches(
     pattern_id_to_index = {f"p{i + 1}": i for i in range(len(patterns))}
 
     cached_matches = []
+    frames_with_matches: set[int] = set()
+
     for match in matches:
         pattern_id = match.get("pattern", "p1")
         pattern_index = pattern_id_to_index.get(pattern_id, 0)
 
-        cached_matches.append(
-            {
-                "pattern_index": pattern_index,
-                "offset": match.get("offset", 0),
-                "line_number": match.get("relative_line_number", 0),
-            }
-        )
+        cached_match = {
+            "pattern_index": pattern_index,
+            "offset": match.get("offset", 0),
+            "line_number": match.get("relative_line_number", 0),
+        }
+
+        # For seekable zstd files, include frame_index
+        frame_index = match.get("frame_index")
+        if frame_index is not None:
+            cached_match["frame_index"] = frame_index
+            frames_with_matches.add(frame_index)
+
+        cached_matches.append(cached_match)
 
     # Extract relevant flags for cache key
     relevant_flags = sorted([f for f in rg_flags if f in MATCHING_FLAGS])
 
-    return {
+    cache_data = {
         "version": TRACE_CACHE_VERSION,
         "source_path": abs_path,
         "source_modified_at": source_mtime,
@@ -303,6 +319,16 @@ def build_cache_from_matches(
         "matches": cached_matches,
     }
 
+    # Add compression-specific fields
+    if compression_format:
+        cache_data["compression_format"] = compression_format
+
+    # For seekable zstd, add frames_with_matches for fast lookup
+    if compression_format == "zstd-seekable" and frames_with_matches:
+        cache_data["frames_with_matches"] = sorted(frames_with_matches)
+
+    return cache_data
+
 
 def reconstruct_match_data(
     source_path: str,
@@ -313,6 +339,7 @@ def reconstruct_match_data(
     rg_flags: list[str],
     context_before: int = 0,
     context_after: int = 0,
+    use_index: bool = True,
 ) -> tuple[dict, list[ContextLine]]:
     """Reconstruct full match data from a cached match entry.
 
@@ -346,7 +373,7 @@ def reconstruct_match_data(
         [line_number],
         context_before,
         context_after,
-        use_index=True,
+        use_index=use_index,
     )
 
     all_lines = context_data.get(line_number, [])
@@ -375,11 +402,13 @@ def reconstruct_match_data(
         logger.debug(f"Failed to extract submatches for pattern {pattern}: {e}")
 
     # Build match dict in the same format as trace.py produces
+    # For cached files, we know the absolute line number (it's the same as relative for complete scans)
     match_dict = {
         "pattern": pattern_id,
         "file": file_id,
         "offset": offset,
         "relative_line_number": line_number,
+        "absolute_line_number": line_number,  # Known for cached complete scans
         "line_text": matched_line,
         "submatches": submatches,
     }
@@ -396,12 +425,293 @@ def reconstruct_match_data(
         context_lines.append(
             ContextLine(
                 relative_line_number=ctx_line_num,
+                absolute_line_number=ctx_line_num,  # Known for cached complete scans
                 line_text=line,
                 absolute_offset=ctx_offset,
             )
         )
 
     return match_dict, context_lines
+
+
+def get_compressed_cache_info(
+    source_path: str,
+    patterns: list[str],
+    rg_flags: list[str],
+) -> dict | None:
+    """Get cache info for a compressed file, including frames_with_matches.
+
+    Args:
+        source_path: Path to the compressed file
+        patterns: List of regex patterns
+        rg_flags: List of ripgrep flags
+
+    Returns:
+        Dict with cache info including compression_format and frames_with_matches,
+        or None if no valid cache exists
+    """
+    if not is_trace_cache_valid(source_path, patterns, rg_flags):
+        return None
+
+    cache_path = get_trace_cache_path(source_path, patterns, rg_flags)
+    cache_data = load_trace_cache(cache_path)
+
+    if cache_data is None:
+        return None
+
+    return {
+        "compression_format": cache_data.get("compression_format"),
+        "frames_with_matches": cache_data.get("frames_with_matches", []),
+        "matches": cache_data.get("matches", []),
+        "match_count": len(cache_data.get("matches", [])),
+    }
+
+
+def reconstruct_seekable_zstd_match(
+    source_path: str,
+    cached_match: dict,
+    patterns: list[str],
+    pattern_ids: dict[str, str],
+    file_id: str,
+    rg_flags: list[str],
+    decompressed_frames: dict[int, bytes],
+    frame_line_offsets: dict[int, int],
+    context_before: int = 0,
+    context_after: int = 0,
+) -> tuple[dict, list[ContextLine]]:
+    """Reconstruct match data from a cached seekable zstd match.
+
+    This function uses pre-decompressed frame data to reconstruct the match,
+    avoiding redundant decompression when multiple matches are in the same frame.
+
+    Args:
+        source_path: Path to the seekable zstd file
+        cached_match: Cached match dict with pattern_index, offset, line_number, frame_index
+        patterns: List of regex patterns
+        pattern_ids: Dict mapping pattern_id to pattern string
+        file_id: File ID for this file (e.g., 'f1')
+        rg_flags: List of ripgrep flags
+        decompressed_frames: Dict mapping frame_index to decompressed bytes
+        frame_line_offsets: Dict mapping frame_index to first line number in that frame
+        context_before: Number of context lines before match
+        context_after: Number of context lines after match
+
+    Returns:
+        Tuple of (match_dict, context_lines)
+    """
+    line_number = cached_match.get("line_number", 1)
+    offset = cached_match.get("offset", 0)
+    pattern_index = cached_match.get("pattern_index", 0)
+    frame_index = cached_match.get("frame_index", 0)
+
+    # Get pattern info
+    pattern = patterns[pattern_index] if pattern_index < len(patterns) else patterns[0]
+    pattern_id = f"p{pattern_index + 1}"
+
+    # Get decompressed frame data
+    frame_data = decompressed_frames.get(frame_index, b"")
+    frame_first_line = frame_line_offsets.get(frame_index, 1)
+
+    # Decode frame to text and split into lines
+    try:
+        frame_text = frame_data.decode("utf-8", errors="replace")
+    except Exception:
+        frame_text = ""
+
+    frame_lines = frame_text.split("\n")
+
+    # Calculate line index within frame (0-based)
+    line_idx_in_frame = line_number - frame_first_line
+
+    # Get matched line and context
+    all_lines = []
+    start_line = max(1, line_number - context_before)
+    end_line = line_number + context_after
+
+    # Collect lines from start_line to end_line
+    for ln in range(start_line, end_line + 1):
+        idx_in_frame = ln - frame_first_line
+        if 0 <= idx_in_frame < len(frame_lines):
+            all_lines.append(frame_lines[idx_in_frame])
+        else:
+            all_lines.append("")  # Line outside frame bounds
+
+    # Find the matched line within our collected lines
+    matched_line_idx = line_number - start_line
+    matched_line = all_lines[matched_line_idx] if 0 <= matched_line_idx < len(all_lines) else ""
+
+    # Extract submatches by running pattern on line
+    flags = re.IGNORECASE if "-i" in rg_flags else 0
+    submatches = []
+    try:
+        for m in re.finditer(pattern, matched_line, flags):
+            submatches.append(
+                Submatch(
+                    text=m.group(),
+                    start=m.start(),
+                    end=m.end(),
+                )
+            )
+    except re.error as e:
+        logger.debug(f"Failed to extract submatches for pattern {pattern}: {e}")
+
+    # Build match dict
+    # For seekable zstd with index, we know the absolute line number
+    match_dict = {
+        "pattern": pattern_id,
+        "file": file_id,
+        "offset": offset,
+        "relative_line_number": line_number,
+        "absolute_line_number": line_number,  # Known from seekable zstd index
+        "line_text": matched_line,
+        "submatches": submatches,
+        "is_compressed": True,
+        "is_seekable_zstd": True,
+    }
+
+    # Build context lines
+    context_lines = []
+    for i, line in enumerate(all_lines):
+        ctx_line_num = start_line + i
+        ctx_offset = offset if ctx_line_num == line_number else -1
+
+        context_lines.append(
+            ContextLine(
+                relative_line_number=ctx_line_num,
+                absolute_line_number=ctx_line_num,  # Known from seekable zstd index
+                line_text=line,
+                absolute_offset=ctx_offset,
+            )
+        )
+
+    return match_dict, context_lines
+
+
+def reconstruct_seekable_zstd_matches(
+    source_path: str,
+    cached_matches: list[dict],
+    frames_with_matches: list[int],
+    patterns: list[str],
+    pattern_ids: dict[str, str],
+    file_id: str,
+    rg_flags: list[str],
+    context_before: int = 0,
+    context_after: int = 0,
+) -> tuple[list[dict], list[ContextLine]]:
+    """Reconstruct all matches from a cached seekable zstd file.
+
+    This function efficiently decompresses only the frames that contain matches,
+    then reconstructs all match data from the decompressed content.
+
+    Args:
+        source_path: Path to the seekable zstd file
+        cached_matches: List of cached match dicts
+        frames_with_matches: List of frame indices that contain matches
+        patterns: List of regex patterns
+        pattern_ids: Dict mapping pattern_id to pattern string
+        file_id: File ID for this file (e.g., 'f1')
+        rg_flags: List of ripgrep flags
+        context_before: Number of context lines before match
+        context_after: Number of context lines after match
+
+    Returns:
+        Tuple of (list of match dicts, list of context lines)
+    """
+    from rx.seekable_index import get_or_build_index
+    from rx.seekable_zstd import decompress_frame
+
+    start_time = time.time()
+
+    # Get index for line number mapping
+    index = get_or_build_index(source_path)
+
+    # Build frame_index -> first_line mapping
+    frame_line_offsets = {frame.index: frame.first_line for frame in index.frames}
+
+    # Decompress only frames with matches
+    decompressed_frames: dict[int, bytes] = {}
+    for frame_idx in frames_with_matches:
+        try:
+            frame_data = decompress_frame(source_path, frame_idx)
+            decompressed_frames[frame_idx] = frame_data
+            logger.debug(f"Decompressed frame {frame_idx} ({len(frame_data)} bytes)")
+        except Exception as e:
+            logger.warning(f"Failed to decompress frame {frame_idx}: {e}")
+            decompressed_frames[frame_idx] = b""
+
+    # Reconstruct each match
+    all_matches = []
+    all_context_lines = []
+
+    for cached_match in cached_matches:
+        try:
+            match_dict, ctx_lines = reconstruct_seekable_zstd_match(
+                source_path,
+                cached_match,
+                patterns,
+                pattern_ids,
+                file_id,
+                rg_flags,
+                decompressed_frames,
+                frame_line_offsets,
+                context_before,
+                context_after,
+            )
+            all_matches.append(match_dict)
+            all_context_lines.extend(ctx_lines)
+        except Exception as e:
+            logger.warning(f"Failed to reconstruct match: {e}")
+
+    elapsed = time.time() - start_time
+    prom.trace_cache_reconstruction_seconds.observe(elapsed)
+    logger.info(
+        f"Reconstructed {len(all_matches)} matches from {len(frames_with_matches)} frames "
+        f"in {elapsed:.3f}s (seekable zstd cache hit)"
+    )
+
+    return all_matches, all_context_lines
+
+
+def should_cache_compressed_file(
+    file_size: int,
+    max_results: int | None,
+    scan_completed: bool,
+) -> bool:
+    """Determine if a compressed file's trace results should be cached.
+
+    Similar to should_cache_file but with different threshold logic for compressed files.
+    Compressed files are always worth caching since decompression is expensive.
+
+    Args:
+        file_size: Compressed size of the file in bytes
+        max_results: Max results limit (None if no limit)
+        scan_completed: Whether the scan completed without interruption
+
+    Returns:
+        True if the file should be cached
+    """
+    # For compressed files, use a lower threshold since decompression is expensive
+    # Cache if compressed size >= 1MB (smaller than regular file threshold)
+    compressed_threshold = 1 * 1024 * 1024  # 1MB
+
+    if file_size < compressed_threshold:
+        logger.debug(f"Compressed file too small for caching: {file_size} < {compressed_threshold}")
+        prom.trace_cache_skip_total.inc()
+        return False
+
+    # Only cache complete scans (no max_results limit)
+    if max_results is not None:
+        logger.debug(f"Skipping compressed cache: max_results={max_results} was set")
+        prom.trace_cache_skip_total.inc()
+        return False
+
+    # Only cache if scan completed successfully
+    if not scan_completed:
+        logger.debug("Skipping compressed cache: scan did not complete")
+        prom.trace_cache_skip_total.inc()
+        return False
+
+    return True
 
 
 def should_cache_file(

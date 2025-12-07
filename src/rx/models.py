@@ -172,12 +172,17 @@ class ContextLine(BaseModel):
         relative_line_number: Line number relative to file start (1-indexed).
                              When file_chunks=1, this is the absolute line number.
                              When file_chunks>1, this may be relative to chunk boundary.
+        absolute_line_number: Absolute line number from start of file (1-indexed), or -1 if unknown.
+                             This is always set when possible (for indexed files, complete scans, etc.)
         line_text: The actual line content
         absolute_offset: Byte offset from start of file to start of this line
     """
 
     relative_line_number: int = Field(
         ..., example=42, description="Line number in file (1-indexed, see file_chunks to determine if absolute)"
+    )
+    absolute_line_number: int = Field(
+        default=-1, example=42, description="Absolute line number from file start (1-indexed), or -1 if unknown"
     )
     line_text: str = Field(..., example="  previous line", description="Line content")
     absolute_offset: int = Field(..., example=1234, description="Byte offset in file")
@@ -193,6 +198,8 @@ class Match(BaseModel):
         relative_line_number: Line number relative to file start (1-indexed, optional).
                              When file_chunks=1, this is the absolute line number.
                              When file_chunks>1, this may be relative to chunk boundary.
+        absolute_line_number: Absolute line number from start of file (1-indexed), or -1 if unknown.
+                             This is always set when possible (for indexed files, complete scans, etc.)
         line_text: The actual line content that matched (optional)
         submatches: List of submatch details with positions (optional)
     """
@@ -202,6 +209,9 @@ class Match(BaseModel):
     offset: int = Field(..., example=123, description="Byte offset in file where matched line starts")
     relative_line_number: int | None = Field(
         None, example=42, description="Line number in file (1-indexed, see file_chunks to determine if absolute)"
+    )
+    absolute_line_number: int = Field(
+        default=-1, example=42, description="Absolute line number from file start (1-indexed), or -1 if unknown"
     )
     line_text: str | None = Field(None, example="error: something failed", description="The matched line")
     submatches: list[Submatch] | None = Field(None, description="Submatch details with positions")
@@ -339,23 +349,36 @@ class TraceResponse(BaseModel):
         if self.matches:
             lines.append("")
             if colorize:
-                lines.append(f"{GREY}Matches:{RESET}")
+                lines.append(f"{GREY}Matches (file:line:offset [pattern]):{RESET}")
             else:
-                lines.append("Matches:")
+                lines.append("Matches (file:line:offset [pattern]:")
 
             for match in self.matches:
                 pattern_val = self.patterns.get(match.pattern, match.pattern)
                 file_val = self.files.get(match.file, match.file)
 
+                # Use absolute_line_number if available, otherwise relative_line_number, or -1
+                line_num = (
+                    match.absolute_line_number
+                    if match.absolute_line_number != -1
+                    else (match.relative_line_number or -1)
+                )
+
                 if colorize:
+                    # Add ORANGE color for offset
+                    ORANGE = '\033[38;5;214m'  # Orange color
+                    LIGHT_GREY = '\033[37m'  # Light grey
+
                     lines.append(
                         f"  {CYAN}{file_val}{RESET}"
                         f"{GREY}:{RESET}"
-                        f"{YELLOW}{match.offset}{RESET} "
+                        f"{YELLOW}{line_num}{RESET}"
+                        f"{GREY}:{RESET}"
+                        f"{LIGHT_GREY}{match.offset}{RESET} "
                         f"{GREY}[{RESET}{MAGENTA}{pattern_val}{RESET}{GREY}]{RESET}"
                     )
                 else:
-                    lines.append(f"  {file_val}:{match.offset} [{pattern_val}]")
+                    lines.append(f"  {file_val}:{line_num}:{match.offset} [{pattern_val}]")
 
         return "\n".join(lines)
 
@@ -701,6 +724,10 @@ class SamplesResponse(BaseModel):
             "456": ["Another before", "Another match", "Another after"],
         },
     )
+    is_compressed: bool = Field(default=False, description="Whether the source file is compressed")
+    compression_format: str | None = Field(
+        default=None, example="gzip", description="Compression format if file is compressed"
+    )
 
     def to_cli(self, colorize: bool = False, regex: str = None) -> str:
         """Format response for CLI output
@@ -711,22 +738,39 @@ class SamplesResponse(BaseModel):
         """
         output_lines = []
         output_lines.append(f"File: {self.path}")
+        if self.is_compressed and self.compression_format:
+            output_lines.append(f"Compressed: {self.compression_format}")
         output_lines.append(f"Context: {self.before_context} before, {self.after_context} after")
         output_lines.append("")
 
         # ANSI color codes
         GREY = '\033[90m'
+        CYAN = '\033[96m'
+        YELLOW = '\033[93m'
+        LIGHT_GREY = '\033[37m'
         RED = '\033[91m'
         RESET = '\033[0m'
 
         # Determine which mode we're in (offsets or lines)
         if self.offsets:
-            for offset in self.offsets:
+            for offset_str in self.offsets:
+                offset = int(offset_str)
                 key = str(offset)
                 if key in self.samples:
-                    header = f"=== Offset: {offset} ==="
+                    # Get line number from offsets dict
+                    line_num = self.offsets[offset_str]
+
+                    # Format: file:line:offset
                     if colorize:
-                        header = f"{GREY}{header}{RESET}"
+                        header = (
+                            f"=== {CYAN}{self.path}{RESET}"
+                            f"{GREY}:{RESET}"
+                            f"{YELLOW}{line_num}{RESET}"
+                            f"{GREY}:{RESET}"
+                            f"{LIGHT_GREY}{offset}{RESET} ==="
+                        )
+                    else:
+                        header = f"=== {self.path}:{line_num}:{offset} ==="
                     output_lines.append(header)
 
                     context_lines = self.samples[key]
@@ -741,12 +785,24 @@ class SamplesResponse(BaseModel):
                             output_lines.append(line)
                     output_lines.append("")
         elif self.lines:
-            for line_num in self.lines:
+            for line_num_str in self.lines:
+                line_num = int(line_num_str)
                 key = str(line_num)
                 if key in self.samples:
-                    header = f"=== Line: {line_num} ==="
+                    # Get byte offset from lines dict
+                    byte_offset = self.lines[line_num_str]
+
+                    # Format: file:line:offset
                     if colorize:
-                        header = f"{GREY}{header}{RESET}"
+                        header = (
+                            f"=== {CYAN}{self.path}{RESET}"
+                            f"{GREY}:{RESET}"
+                            f"{YELLOW}{line_num}{RESET}"
+                            f"{GREY}:{RESET}"
+                            f"{LIGHT_GREY}{byte_offset}{RESET} ==="
+                        )
+                    else:
+                        header = f"=== {self.path}:{line_num}:{byte_offset} ==="
                     output_lines.append(header)
 
                     context_lines = self.samples[key]
@@ -809,3 +865,61 @@ class TraceCompletePayload(BaseModel):
     total_files_skipped: int = Field(..., description="Total number of files skipped")
     total_matches: int = Field(..., description="Total number of matches found")
     total_time_ms: int = Field(..., description="Total time taken for the trace in milliseconds")
+
+
+# Seekable Zstd / Compression Models
+
+
+class SeekableFrameInfo(BaseModel):
+    """Information about a single frame in a seekable zstd file."""
+
+    index: int = Field(..., description="Frame index (0-based)")
+    compressed_offset: int = Field(..., description="Byte offset of frame in compressed file")
+    compressed_size: int = Field(..., description="Size of compressed frame in bytes")
+    decompressed_offset: int = Field(..., description="Byte offset of frame in decompressed stream")
+    decompressed_size: int = Field(..., description="Size of decompressed frame in bytes")
+    first_line: int | None = Field(None, description="First line number in this frame (1-based)")
+    last_line: int | None = Field(None, description="Last line number in this frame (1-based)")
+
+
+class SeekableZstdInfoResponse(BaseModel):
+    """Response with information about a seekable zstd file."""
+
+    path: str = Field(..., description="Path to the seekable zstd file")
+    compressed_size: int = Field(..., description="Compressed file size in bytes")
+    compressed_size_human: str = Field(..., description="Human-readable compressed size")
+    decompressed_size: int = Field(..., description="Decompressed content size in bytes")
+    decompressed_size_human: str = Field(..., description="Human-readable decompressed size")
+    compression_ratio: float = Field(..., description="Compression ratio (decompressed/compressed)")
+    frame_count: int = Field(..., description="Number of frames in the file")
+    frame_size_target: int = Field(..., description="Target frame size in bytes")
+    total_lines: int | None = Field(None, description="Total line count (if index exists)")
+    index_available: bool = Field(..., description="Whether line index is available")
+    frames: list[SeekableFrameInfo] | None = Field(None, description="Frame details (if requested)")
+
+
+class CompressRequest(BaseModel):
+    """Request to compress a file to seekable zstd format."""
+
+    input_path: str = Field(..., description="Path to input file")
+    output_path: str | None = Field(None, description="Path for output .zst file (default: input_path.zst)")
+    frame_size: str = Field(default="4M", description="Target frame size (e.g., '4M', '10MB')")
+    compression_level: int = Field(default=3, ge=1, le=22, description="Zstd compression level (1-22)")
+    build_index: bool = Field(default=True, description="Build line index after compression")
+    force: bool = Field(default=False, description="Overwrite existing output file")
+
+
+class CompressResponse(BaseModel):
+    """Response from compress operation."""
+
+    success: bool = Field(..., description="Whether compression succeeded")
+    input_path: str = Field(..., description="Path to input file")
+    output_path: str | None = Field(None, description="Path to output .zst file")
+    compressed_size: int | None = Field(None, description="Compressed file size in bytes")
+    decompressed_size: int | None = Field(None, description="Original/decompressed size in bytes")
+    compression_ratio: float | None = Field(None, description="Compression ratio")
+    frame_count: int | None = Field(None, description="Number of frames created")
+    total_lines: int | None = Field(None, description="Total line count (if index built)")
+    index_built: bool = Field(default=False, description="Whether line index was built")
+    time_seconds: float | None = Field(None, description="Compression time in seconds")
+    error: str | None = Field(None, description="Error message if failed")

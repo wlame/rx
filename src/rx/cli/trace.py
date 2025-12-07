@@ -19,14 +19,16 @@ from rx.request_store import increment_hook_counter, store_request, update_reque
 from rx.trace import HookCallbacks, parse_paths
 
 
-def format_context_header(file_val: str, offset_str: str, pattern_val: str, colorize: bool) -> str:
+def format_context_header(file_val: str, line_num: int, offset_str: str, pattern_val: str, colorize: bool) -> str:
     """Format the header line for a context block."""
     if colorize:
         return (
             click.style("=== ", fg="bright_black")
             + click.style(file_val, fg="cyan", bold=True)
             + click.style(":", fg="bright_black")
-            + click.style(offset_str, fg="yellow")
+            + click.style(str(line_num), fg="yellow")
+            + click.style(":", fg="bright_black")
+            + click.style(offset_str, fg="white")
             + " "
             + click.style("[", fg="bright_black")
             + click.style(pattern_val, fg="magenta", bold=True)
@@ -35,7 +37,7 @@ def format_context_header(file_val: str, offset_str: str, pattern_val: str, colo
             + click.style("===", fg="bright_black")
         )
     else:
-        return f"=== {file_val}:{offset_str} [{pattern_val}] ==="
+        return f"=== {file_val}:{line_num}:{offset_str} [{pattern_val}] ==="
 
 
 def find_match_for_context(
@@ -44,7 +46,11 @@ def find_match_for_context(
     """Find the matched line and line number for a given context block."""
     for match in response.matches:
         if match.pattern == pattern_id and match.file == file_id and match.offset == offset_int:
-            return match.line_text, match.relative_line_number
+            # Use absolute_line_number if available, otherwise relative_line_number, or -1
+            line_num = (
+                match.absolute_line_number if match.absolute_line_number != -1 else (match.relative_line_number or -1)
+            )
+            return match.line_text, line_num
     return None, None
 
 
@@ -132,7 +138,7 @@ def display_context_block(
     matched_line, match_line_number = find_match_for_context(response, pattern_id, file_id, offset_int)
 
     # Format and display header
-    header = format_context_header(file_val, offset_str, pattern_val, colorize)
+    header = format_context_header(file_val, match_line_number or -1, offset_str, pattern_val, colorize)
     click.echo(header)
 
     # Get context lines for this match
@@ -254,6 +260,8 @@ def handle_samples_output(
 @click.option('--hook-on-file', type=str, help="URL to call (GET) when file scan completes")
 @click.option('--hook-on-match', type=str, help="URL to call (GET) for each match. Requires --max-results.")
 @click.option('--hook-on-complete', type=str, help="URL to call (GET) when trace completes")
+@click.option('--no-cache', is_flag=True, help="Disable trace cache (don't read from or write to cache)")
+@click.option('--no-index', is_flag=True, help="Disable file indexing (don't use existing indexes)")
 @click.pass_context
 def trace_command(
     ctx,
@@ -273,6 +281,8 @@ def trace_command(
     hook_on_file,
     hook_on_match,
     hook_on_complete,
+    no_cache,
+    no_index,
 ):
     """
     Trace files and directories for regex patterns using ripgrep.
@@ -321,6 +331,12 @@ def trace_command(
 
     # Extract extra ripgrep arguments from unknown options
     rg_extra_args = ctx.args if ctx.args else []
+
+    # Apply environment variable defaults for no_cache and no_index
+    if not no_cache and os.environ.get('RX_NO_CACHE', '').lower() in ('1', 'true', 'yes'):
+        no_cache = True
+    if not no_index and os.environ.get('RX_NO_INDEX', '').lower() in ('1', 'true', 'yes'):
+        no_index = True
 
     # Enable debug mode if --debug flag is set
     if debug:
@@ -400,6 +416,8 @@ def trace_command(
                 context_before=before_ctx,
                 context_after=after_ctx,
                 hooks=hook_callbacks,
+                use_cache=not no_cache,
+                use_index=not no_index,
             )
             parsing_time = time() - time_before
 

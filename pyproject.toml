@@ -26,6 +26,7 @@ dependencies = [
     "prometheus-client>=0.21.0",
     "psutil>=7.1.2",
     "httpx>=0.28.1",
+    "zstandard>=0.23.0",
 ]
 
 [project.urls]

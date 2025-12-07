@@ -24,27 +24,32 @@ class TestFormatContextHeader:
     def test_format_without_color(self):
         """Test header formatting without colors"""
         result = format_context_header(
-            file_val="/path/to/file.txt", offset_str="123", pattern_val="error", colorize=False
+            file_val="/path/to/file.txt", line_num=5, offset_str="123", pattern_val="error", colorize=False
         )
-        assert result == "=== /path/to/file.txt:123 [error] ==="
+        assert result == "=== /path/to/file.txt:5:123 [error] ==="
 
     def test_format_with_color(self):
         """Test header formatting with colors"""
         result = format_context_header(
-            file_val="/path/to/file.txt", offset_str="123", pattern_val="error", colorize=True
+            file_val="/path/to/file.txt", line_num=5, offset_str="123", pattern_val="error", colorize=True
         )
         # Should contain ANSI escape codes for colors
         assert "\x1b[" in result  # ANSI escape sequence
         assert "/path/to/file.txt" in result
+        assert "5" in result
         assert "123" in result
         assert "error" in result
 
     def test_format_handles_special_characters(self):
         """Test header formatting with special characters in paths"""
         result = format_context_header(
-            file_val="/path/with spaces/file (1).txt", offset_str="999", pattern_val="[a-z]+", colorize=False
+            file_val="/path/with spaces/file (1).txt",
+            line_num=10,
+            offset_str="999",
+            pattern_val="[a-z]+",
+            colorize=False,
         )
-        assert result == "=== /path/with spaces/file (1).txt:999 [[a-z]+] ==="
+        assert result == "=== /path/with spaces/file (1).txt:10:999 [[a-z]+] ==="
 
 
 class TestFindMatchForContext:

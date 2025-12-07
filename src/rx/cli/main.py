@@ -7,6 +7,7 @@ import click
 from rx.__version__ import __version__
 from rx.cli.analyse import analyse_command
 from rx.cli.check import check_command
+from rx.cli.compress import compress_command
 from rx.cli.index import index_command
 from rx.cli.samples import samples_command
 from rx.cli.serve import serve_command
@@ -42,6 +43,7 @@ def cli(ctx):
       rx <path> <pattern>     Trace files for patterns (default command)
       rx analyse <path>       Analyze files (metadata, statistics)
       rx check <pattern>      Analyze regex complexity
+      rx compress <path>      Create seekable zstd for optimized access
       rx index <path>         Create/manage large file indexes
       rx samples <path>       Get file content around byte offsets
       rx serve               Start web API server
@@ -70,6 +72,7 @@ def cli(ctx):
 cli.add_command(trace_command, name='trace')
 cli.add_command(analyse_command, name='analyse')
 cli.add_command(check_command, name='check')
+cli.add_command(compress_command, name='compress')
 cli.add_command(index_command, name='index')
 cli.add_command(samples_command, name='samples')
 cli.add_command(serve_command, name='serve')

@@ -44,7 +44,9 @@ class TestSamplesCommand:
         result = self.runner.invoke(samples_command, [self.test_file, "-b", str(offset)])
         assert result.exit_code == 0
         assert "error occurred" in result.output
-        assert f"Offset: {offset}" in result.output
+        # New format is file:line:offset
+        assert f":{offset}" in result.output  # Check offset appears in output
+        assert "===" in result.output  # Check header separator
 
     def test_samples_multiple_offsets(self):
         """Test samples command with multiple byte offsets."""
@@ -54,8 +56,9 @@ class TestSamplesCommand:
         assert result.exit_code == 0
         assert "error occurred" in result.output
         assert "another error" in result.output
-        assert f"Offset: {offset1}" in result.output
-        assert f"Offset: {offset2}" in result.output
+        # New format is file:line:offset
+        assert f":{offset1}" in result.output
+        assert f":{offset2}" in result.output
 
     def test_samples_with_context(self):
         """Test samples command with custom context size."""
@@ -336,7 +339,8 @@ class TestSamplesCommandOutput:
         result = self.runner.invoke(samples_command, [self.test_file, "-b", "0"])
         assert result.exit_code == 0
         assert "===" in result.output
-        assert "Offset:" in result.output
+        # New format shows file:line:offset instead of "Offset:"
+        assert ":0" in result.output  # Offset 0 should appear
 
     def test_json_structure(self):
         """Test JSON output has correct structure."""
@@ -378,7 +382,8 @@ class TestSamplesLineOffset:
         result = self.runner.invoke(samples_command, [self.test_file, "-l", "3"])
         assert result.exit_code == 0
         assert "error occurred" in result.output
-        assert "Line: 3" in result.output
+        # New format is file:line:offset instead of "Line: 3"
+        assert ":3:" in result.output  # Line 3 should appear in format
 
     def test_line_offset_multiple(self):
         """Test samples command with multiple line numbers."""
@@ -386,8 +391,9 @@ class TestSamplesLineOffset:
         assert result.exit_code == 0
         assert "error occurred" in result.output
         assert "another error" in result.output
-        assert "Line: 3" in result.output
-        assert "Line: 5" in result.output
+        # New format is file:line:offset
+        assert ":3:" in result.output
+        assert ":5:" in result.output
 
     def test_line_offset_json_output(self):
         """Test line offset with JSON output."""
@@ -439,14 +445,16 @@ class TestSamplesLineOffset:
         result = self.runner.invoke(samples_command, [self.test_file, "-l", "1"])
         assert result.exit_code == 0
         assert "first line" in result.output
-        assert "Line: 1" in result.output
+        # New format is file:line:offset
+        assert ":1:" in result.output
 
     def test_line_offset_last_line(self):
         """Test getting last line of file."""
         result = self.runner.invoke(samples_command, [self.test_file, "-l", "6"])
         assert result.exit_code == 0
         assert "final line" in result.output
-        assert "Line: 6" in result.output
+        # New format is file:line:offset
+        assert ":6:" in result.output
 
     def test_line_offset_no_color(self):
         """Test line offset with --no-color flag."""

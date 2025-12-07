@@ -18,6 +18,8 @@ from rx import file_utils as file_utils_module
 from rx import prometheus as prom
 from rx.__version__ import __version__
 from rx.analyse import analyse_path, calculate_regex_complexity
+from rx.compressed_index import get_decompressed_content_at_line, get_or_build_compressed_index
+from rx.compression import CompressionFormat, detect_compression, is_compressed
 from rx.file_utils import get_context, get_context_by_lines, validate_file
 from rx.hooks import (
     DISABLE_CUSTOM_HOOKS,
@@ -744,6 +746,12 @@ async def samples(
         prom.record_http_response('GET', '/v1/samples', 403)
         raise HTTPException(status_code=403, detail=str(e))
 
+    # Check if file is compressed
+    file_is_compressed = await anyio.to_thread.run_sync(is_compressed, path)
+    compression_format = CompressionFormat.NONE
+    if file_is_compressed:
+        compression_format = await anyio.to_thread.run_sync(detect_compression, path)
+
     # Validate mutual exclusivity of offsets and lines
     if offsets and lines:
         prom.record_error('invalid_params')
@@ -754,6 +762,15 @@ async def samples(
         prom.record_error('invalid_params')
         prom.record_http_response('GET', '/v1/samples', 400)
         raise HTTPException(status_code=400, detail="Must provide either 'offsets' or 'lines' parameter.")
+
+    # Compressed files only support line mode
+    if file_is_compressed and offsets:
+        prom.record_error('invalid_params')
+        prom.record_http_response('GET', '/v1/samples', 400)
+        raise HTTPException(
+            status_code=400,
+            detail="Byte offsets are not supported for compressed files. Use 'lines' parameter instead.",
+        )
 
     # Parse offsets or lines
     offset_list: list[int] = []
@@ -779,20 +796,61 @@ async def samples(
     before = before_context if before_context is not None else context if context is not None else 3
     after = after_context if after_context is not None else context if context is not None else 3
 
-    # Validate file (offload blocking disk I/O)
-    try:
-        await anyio.to_thread.run_sync(validate_file, path)
-    except FileNotFoundError as e:
-        prom.record_error('file_not_found')
-        prom.record_http_response('GET', '/v1/samples', 404)
-        raise HTTPException(status_code=404, detail=str(e))
-    except ValueError as e:
-        prom.record_error('binary_file')
-        prom.record_http_response('GET', '/v1/samples', 400)
-        raise HTTPException(status_code=400, detail=str(e))
+    # Validate file (offload blocking disk I/O) - skip for compressed files
+    if not file_is_compressed:
+        try:
+            await anyio.to_thread.run_sync(validate_file, path)
+        except FileNotFoundError as e:
+            prom.record_error('file_not_found')
+            prom.record_http_response('GET', '/v1/samples', 404)
+            raise HTTPException(status_code=404, detail=str(e))
+        except ValueError as e:
+            prom.record_error('binary_file')
+            prom.record_http_response('GET', '/v1/samples', 400)
+            raise HTTPException(status_code=400, detail=str(e))
+    else:
+        # For compressed files, just check existence
+        if not os.path.exists(path):
+            prom.record_error('file_not_found')
+            prom.record_http_response('GET', '/v1/samples', 404)
+            raise HTTPException(status_code=404, detail=f"File not found: {path}")
 
     # Get context (offload blocking file I/O)
     try:
+        time_before = time()
+
+        # Handle compressed files separately
+        if file_is_compressed:
+            # Build/load compressed index and get samples
+            index_data = await anyio.to_thread.run_sync(get_or_build_compressed_index, path)
+
+            context_data: dict[int, list[str]] = {}
+            for line_num in line_list:
+                lines_content = await anyio.to_thread.run_sync(
+                    get_decompressed_content_at_line, path, line_num, before, after, index_data
+                )
+                context_data[line_num] = lines_content
+
+            num_items = len(line_list)
+            duration = time() - time_before
+
+            prom.record_samples_request(
+                status='success', duration=duration, num_offsets=num_items, before_ctx=before, after_ctx=after
+            )
+            prom.record_http_response('GET', '/v1/samples', 200)
+
+            return {
+                'path': path,
+                'offsets': {},
+                'lines': {str(ln): -1 for ln in line_list},  # No byte offsets for compressed
+                'before_context': before,
+                'after_context': after,
+                'samples': {str(k): v for k, v in context_data.items()},
+                'is_compressed': True,
+                'compression_format': compression_format.value,
+            }
+
+        # Regular file handling
         from rx.index import (
             calculate_exact_line_for_offset,
             calculate_exact_offset_for_line,
@@ -800,16 +858,12 @@ async def samples(
             load_index,
         )
 
-        time_before = time()
-
         # Load index once for mapping calculations
         index_path = get_index_path(path)
         index_data = await anyio.to_thread.run_sync(load_index, index_path)
 
         if use_lines:
-            context_data: dict[int, list[str]] = await anyio.to_thread.run_sync(
-                get_context_by_lines, path, line_list, before, after
-            )
+            context_data = await anyio.to_thread.run_sync(get_context_by_lines, path, line_list, before, after)
             num_items = len(line_list)
 
             # Calculate byte offsets for each line number
@@ -850,6 +904,8 @@ async def samples(
             'before_context': before,
             'after_context': after,
             'samples': {str(k): v for k, v in context_data.items()},
+            'is_compressed': False,
+            'compression_format': None,
         }
     except ValueError as e:
         prom.record_error('invalid_context')

@@ -229,10 +229,54 @@ rx serve --host=0.0.0.0 --port=8000 --search-root=/data
 RX_WORKERS=1 rx serve --host=0.0.0.0 --port=8000
 ```
 
+## Compressed File Support
+
+RX can search and extract samples from compressed files without manual decompression. Supported formats:
+- **gzip** (`.gz`)
+- **zstd** (`.zst`)
+- **xz** (`.xz`)
+- **bzip2** (`.bz2`)
+
+### Searching Compressed Files
+
+```bash
+# Search a gzip file - works exactly like regular files
+rx /var/log/syslog.1.gz "error.*"
+
+# Search with context
+rx /var/log/syslog.1.gz "error" --samples --context=3
+```
+
+### Extracting Samples from Compressed Files
+
+For compressed files, use **line numbers** (byte offsets are not meaningful in compressed streams):
+
+```bash
+# Get lines 100, 200, 300 with 5 lines of context
+rx samples /var/log/syslog.1.gz -l 100,200,300 --context=5
+```
+
+**Note:** The first access to a compressed file builds an index for efficient random access. This may take time for large files but subsequent accesses are fast.
+
+### Performance Considerations
+
+- Compressed files are processed **sequentially** (no parallel chunking)
+- For very large compressed files, consider converting to seekable zstd format (Tier 2 feature, coming soon)
+- The decompression index is cached at `~/.cache/rx/compressed_indexes/`
+
+### API Usage
+
+```bash
+# Search compressed file
+curl "http://localhost:8000/v1/trace?path=/var/log/syslog.1.gz&regexp=error"
+
+# Get samples (use lines parameter, not offsets)
+curl "http://localhost:8000/v1/samples?path=/var/log/syslog.1.gz&lines=100,200&context=3"
+```
+
 ## Roadmap
 
-- **Gzip support**: Process `.gz` files without manual decompression (planned)
-- **Additional formats**: Support for more compressed formats
+- **Seekable zstd**: Parallel processing of seekable zstd files (Tier 2)
 - **Streaming API**: WebSocket endpoint for real-time results
 
 ## Development
