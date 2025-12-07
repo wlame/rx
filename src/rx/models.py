@@ -923,3 +923,53 @@ class CompressResponse(BaseModel):
     index_built: bool = Field(default=False, description="Whether line index was built")
     time_seconds: float | None = Field(None, description="Compression time in seconds")
     error: str | None = Field(None, description="Error message if failed")
+
+
+# Index Request/Response Models
+
+
+class IndexRequest(BaseModel):
+    """Request to build a line index for a file."""
+
+    path: str = Field(..., description="Path to file to index")
+    force: bool = Field(default=False, description="Force rebuild even if valid index exists")
+    threshold: int | None = Field(None, description="Minimum file size in MB to index (default: from env)")
+
+
+class IndexResponse(BaseModel):
+    """Response from index operation."""
+
+    success: bool = Field(..., description="Whether indexing succeeded")
+    path: str = Field(..., description="Path to indexed file")
+    index_path: str | None = Field(None, description="Path to index file")
+    line_count: int | None = Field(None, description="Total line count")
+    file_size: int | None = Field(None, description="File size in bytes")
+    checkpoint_count: int | None = Field(None, description="Number of index checkpoints")
+    time_seconds: float | None = Field(None, description="Indexing time in seconds")
+    error: str | None = Field(None, description="Error message if failed")
+
+
+# Background Task Models
+
+
+class TaskResponse(BaseModel):
+    """Response when starting a background task."""
+
+    task_id: str = Field(..., description="Unique task identifier")
+    status: str = Field(..., description="Task status (queued, running, completed, failed)")
+    message: str = Field(..., description="Human-readable message")
+    path: str = Field(..., description="File path being processed")
+    started_at: str | None = Field(None, description="ISO timestamp when task started")
+
+
+class TaskStatusResponse(BaseModel):
+    """Response when querying task status."""
+
+    task_id: str = Field(..., description="Unique task identifier")
+    status: str = Field(..., description="Task status (queued, running, completed, failed)")
+    path: str = Field(..., description="File path being processed")
+    operation: str = Field(..., description="Operation type (compress, index)")
+    started_at: str | None = Field(None, description="ISO timestamp when task started")
+    completed_at: str | None = Field(None, description="ISO timestamp when task completed")
+    error: str | None = Field(None, description="Error message if failed")
+    result: dict | None = Field(None, description="Task result if completed")

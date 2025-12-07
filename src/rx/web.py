@@ -29,15 +29,20 @@ from rx.hooks import (
     get_effective_hooks,
     get_hook_env_config,
 )
+from rx.index import create_index_file, get_index_path, get_large_file_threshold_bytes
 from rx.models import (
     AnalyseResponse,
     ComplexityResponse,
+    CompressRequest,
     FileScannedPayload,
     HealthResponse,
+    IndexRequest,
     Match,
     MatchFoundPayload,
     RequestInfo,
     SamplesResponse,
+    TaskResponse,
+    TaskStatusResponse,
     TraceCompletePayload,
     TraceResponse,
 )
@@ -50,6 +55,8 @@ from rx.path_security import (
     validate_paths_within_root,
 )
 from rx.request_store import increment_hook_counter, store_request, update_request
+from rx.seekable_zstd import DEFAULT_COMPRESSION_LEVEL, DEFAULT_FRAME_SIZE_BYTES, create_seekable_zstd
+from rx.task_manager import TaskManager
 from rx.trace import HookCallbacks, parse_paths
 
 # Replace the noop prometheus in file_utils module with real one
@@ -104,8 +111,29 @@ async def lifespan(app: FastAPI):
         app.state.rg = None
         app.state.rg_path = None
 
+    # Startup: initialize task manager for background tasks
+    app.state.task_manager = TaskManager()
+    logger.info("Task manager initialized")
+
+    # Startup: schedule periodic task cleanup
+    async def cleanup_tasks_periodically():
+        while True:
+            await asyncio.sleep(300)  # Every 5 minutes
+            count = await app.state.task_manager.cleanup_old_tasks()
+            if count > 0:
+                logger.info(f"Cleaned up {count} old tasks")
+
+    cleanup_task = asyncio.create_task(cleanup_tasks_periodically())
+
     # Run app
     yield
+
+    # Shutdown: cancel cleanup task
+    cleanup_task.cancel()
+    try:
+        await cleanup_task
+    except asyncio.CancelledError:
+        pass
 
     # Shutdown: cleanup if needed
     logger.info("Shutting down rx")
@@ -920,3 +948,373 @@ async def samples(
         prom.record_samples_request('error', 0, num_items, before, after)
         prom.record_http_response('GET', '/v1/samples', 500)
         raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
+
+
+# Helper function to parse frame size
+def parse_frame_size(size_str: str) -> int:
+    """Parse human-readable size string to bytes (e.g., '4M' -> 4194304)."""
+    size_str = size_str.strip().upper()
+    multipliers = {
+        'B': 1,
+        'K': 1024,
+        'KB': 1024,
+        'M': 1024 * 1024,
+        'MB': 1024 * 1024,
+        'G': 1024 * 1024 * 1024,
+        'GB': 1024 * 1024 * 1024,
+    }
+
+    for suffix, mult in sorted(multipliers.items(), key=lambda x: -len(x[0])):
+        if size_str.endswith(suffix):
+            num_str = size_str[: -len(suffix)].strip()
+            return int(float(num_str) * mult)
+
+    return int(size_str)
+
+
+# Background task runners
+async def run_compress_task(
+    task_id: str,
+    task_manager: TaskManager,
+    request: CompressRequest,
+    normalized_path: str,
+):
+    """Run compression in background."""
+    import os
+
+    from rx.seekable_index import build_index as build_seekable_index
+    from rx.task_manager import TaskStatus
+
+    try:
+        await task_manager.update_task(task_id, status=TaskStatus.RUNNING)
+        logger.info(f"[Task {task_id}] Starting compression of {normalized_path}")
+
+        # Determine output path
+        output_path = request.output_path
+        if not output_path:
+            output_path = f"{normalized_path}.zst"
+
+        # Parse frame size
+        frame_size_bytes = parse_frame_size(request.frame_size)
+
+        # Run compression in thread pool (blocking operation)
+        start_time = time()
+        result = await anyio.to_thread.run_sync(
+            create_seekable_zstd,
+            normalized_path,
+            output_path,
+            frame_size_bytes,
+            request.compression_level,
+            None,  # threads (auto)
+            None,  # progress callback
+        )
+        elapsed = time() - start_time
+
+        # Build index if requested
+        index_built = False
+        total_lines = None
+        if request.build_index and result:
+            logger.info(f"[Task {task_id}] Building index for {output_path}")
+            index_result = await anyio.to_thread.run_sync(
+                build_seekable_index,
+                output_path,
+                None,  # progress callback
+            )
+            if index_result:
+                index_built = True
+                total_lines = index_result.total_lines
+
+        # Build result dictionary
+        task_result = {
+            'success': True,
+            'input_path': normalized_path,
+            'output_path': output_path,
+            'compressed_size': result.compressed_size if result else None,
+            'decompressed_size': result.decompressed_size if result else None,
+            'compression_ratio': result.compression_ratio if result else None,
+            'frame_count': result.frame_count if result else None,
+            'total_lines': total_lines,
+            'index_built': index_built,
+            'time_seconds': elapsed,
+        }
+
+        await task_manager.update_task(
+            task_id,
+            status=TaskStatus.COMPLETED,
+            completed_at=datetime.now(timezone.utc),
+            result=task_result,
+        )
+        logger.info(f"[Task {task_id}] Compression completed in {elapsed:.2f}s")
+
+    except Exception as e:
+        logger.error(f"[Task {task_id}] Compression failed: {str(e)}")
+        await task_manager.update_task(
+            task_id,
+            status=TaskStatus.FAILED,
+            completed_at=datetime.now(timezone.utc),
+            error=str(e),
+        )
+
+
+async def run_index_task(
+    task_id: str,
+    task_manager: TaskManager,
+    request: IndexRequest,
+    normalized_path: str,
+):
+    """Run indexing in background."""
+    import os
+
+    from rx.seekable_index import build_index as build_seekable_index
+    from rx.seekable_zstd import is_seekable_zstd
+    from rx.task_manager import TaskStatus
+
+    try:
+        await task_manager.update_task(task_id, status=TaskStatus.RUNNING)
+        logger.info(f"[Task {task_id}] Starting indexing of {normalized_path}")
+
+        start_time = time()
+
+        # Check if it's a seekable zstd file
+        if is_seekable_zstd(normalized_path):
+            # Build seekable zstd index
+            result = await anyio.to_thread.run_sync(
+                build_seekable_index,
+                normalized_path,
+                None,  # progress callback
+            )
+            index_path = get_index_path(normalized_path)  # This will need seekable version
+            line_count = result.total_lines if result else None
+            checkpoint_count = len(result.frames) if result else None
+        else:
+            # Build regular file index
+            result = await anyio.to_thread.run_sync(
+                create_index_file,
+                normalized_path,
+                request.force,
+            )
+            index_path = get_index_path(normalized_path)
+            line_count = result.get('analysis', {}).get('line_count') if result else None
+            checkpoint_count = len(result.get('checkpoints', [])) if result else None
+
+        elapsed = time() - start_time
+        file_size = os.path.getsize(normalized_path)
+
+        # Build result dictionary
+        task_result = {
+            'success': True,
+            'path': normalized_path,
+            'index_path': index_path,
+            'line_count': line_count,
+            'file_size': file_size,
+            'checkpoint_count': checkpoint_count,
+            'time_seconds': elapsed,
+        }
+
+        await task_manager.update_task(
+            task_id,
+            status=TaskStatus.COMPLETED,
+            completed_at=datetime.now(timezone.utc),
+            result=task_result,
+        )
+        logger.info(f"[Task {task_id}] Indexing completed in {elapsed:.2f}s")
+
+    except Exception as e:
+        logger.error(f"[Task {task_id}] Indexing failed: {str(e)}")
+        await task_manager.update_task(
+            task_id,
+            status=TaskStatus.FAILED,
+            completed_at=datetime.now(timezone.utc),
+            error=str(e),
+        )
+
+
+@app.post(
+    '/v1/compress',
+    tags=['Operations'],
+    summary="Compress file to seekable zstd format (background task)",
+    response_model=TaskResponse,
+    responses={
+        200: {"description": "Compression task started"},
+        400: {"description": "Invalid parameters"},
+        403: {"description": "Path outside search roots"},
+        404: {"description": "File not found"},
+        409: {"description": "Compression already in progress for this file"},
+    },
+)
+async def compress(request: CompressRequest):
+    """
+    Start background compression of a file to seekable zstd format.
+
+    Returns immediately with a task ID. Use GET /v1/tasks/{task_id} to check progress.
+
+    **Parameters:**
+    - **path**: Input file path
+    - **output_path**: Output .zst file path (default: input_path.zst)
+    - **frame_size**: Target frame size (default: "4M")
+    - **compression_level**: Zstd level 1-22 (default: 3)
+    - **build_index**: Build line index after compression (default: true)
+    - **force**: Overwrite existing output (default: false)
+
+    **Returns:**
+    Task information with task_id for status polling.
+    """
+    import os
+    from datetime import timezone
+
+    # Validate path security
+    try:
+        normalized_path = validate_path_within_root(request.input_path)
+    except ValueError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+    # Check if file exists
+    if not os.path.exists(normalized_path):
+        raise HTTPException(status_code=404, detail=f"File not found: {request.input_path}")
+
+    # Check if output already exists (unless force)
+    output_path = request.output_path if request.output_path else f"{normalized_path}.zst"
+    if not request.force and os.path.exists(output_path):
+        raise HTTPException(status_code=400, detail=f"Output file already exists: {output_path}")
+
+    # Create task
+    task, is_new = await app.state.task_manager.create_task(normalized_path, "compress")
+
+    if not is_new:
+        # Task already running
+        raise HTTPException(
+            status_code=409, detail=f"Compression already in progress for {request.input_path} (task: {task.task_id})"
+        )
+
+    # Start background task
+    asyncio.create_task(
+        run_compress_task(
+            task.task_id,
+            app.state.task_manager,
+            request,
+            normalized_path,
+        )
+    )
+
+    # Return task info
+    return TaskResponse(
+        task_id=task.task_id,
+        status=task.status.value,
+        message=f"Compression task started for {request.input_path}",
+        path=normalized_path,
+        started_at=task.started_at.isoformat() if task.started_at else None,
+    )
+
+
+@app.post(
+    '/v1/index',
+    tags=['Operations'],
+    summary="Build line index for file (background task)",
+    response_model=TaskResponse,
+    responses={
+        200: {"description": "Indexing task started"},
+        400: {"description": "Invalid parameters"},
+        403: {"description": "Path outside search roots"},
+        404: {"description": "File not found"},
+        409: {"description": "Indexing already in progress for this file"},
+    },
+)
+async def index(request: IndexRequest):
+    """
+    Start background indexing of a file.
+
+    Returns immediately with a task ID. Use GET /v1/tasks/{task_id} to check progress.
+
+    **Parameters:**
+    - **path**: File path to index
+    - **force**: Force rebuild even if valid index exists (default: false)
+    - **threshold**: Minimum file size in MB to index (default: from RX_LARGE_TEXT_FILE_MB env)
+
+    **Returns:**
+    Task information with task_id for status polling.
+    """
+    import os
+    from datetime import timezone
+
+    # Validate path security
+    try:
+        normalized_path = validate_path_within_root(request.path)
+    except ValueError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+    # Check if file exists
+    if not os.path.exists(normalized_path):
+        raise HTTPException(status_code=404, detail=f"File not found: {request.path}")
+
+    # Check file size threshold
+    threshold_bytes = (request.threshold * 1024 * 1024) if request.threshold else get_large_file_threshold_bytes()
+    file_size = os.path.getsize(normalized_path)
+    if file_size < threshold_bytes:
+        raise HTTPException(
+            status_code=400, detail=f"File size {file_size} bytes is below threshold {threshold_bytes} bytes"
+        )
+
+    # Create task
+    task, is_new = await app.state.task_manager.create_task(normalized_path, "index")
+
+    if not is_new:
+        # Task already running
+        raise HTTPException(
+            status_code=409, detail=f"Indexing already in progress for {request.path} (task: {task.task_id})"
+        )
+
+    # Start background task
+    asyncio.create_task(
+        run_index_task(
+            task.task_id,
+            app.state.task_manager,
+            request,
+            normalized_path,
+        )
+    )
+
+    # Return task info
+    return TaskResponse(
+        task_id=task.task_id,
+        status=task.status.value,
+        message=f"Indexing task started for {request.path}",
+        path=normalized_path,
+        started_at=task.started_at.isoformat() if task.started_at else None,
+    )
+
+
+@app.get(
+    '/v1/tasks/{task_id}',
+    tags=['Operations'],
+    summary="Get status of background task",
+    response_model=TaskStatusResponse,
+    responses={
+        200: {"description": "Task status retrieved"},
+        404: {"description": "Task not found"},
+    },
+)
+async def get_task_status(task_id: str):
+    """
+    Get the status of a background task (compress or index).
+
+    **Parameters:**
+    - **task_id**: UUID of the task
+
+    **Returns:**
+    Task status information including completion state and result.
+    """
+    task = await app.state.task_manager.get_task(task_id)
+
+    if not task:
+        raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
+
+    return TaskStatusResponse(
+        task_id=task.task_id,
+        status=task.status.value,
+        path=task.path,
+        operation=task.operation,
+        started_at=task.started_at.isoformat() if task.started_at else None,
+        completed_at=task.completed_at.isoformat() if task.completed_at else None,
+        error=task.error,
+        result=task.result,
+    )
