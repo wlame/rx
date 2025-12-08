@@ -8,8 +8,7 @@ from pathlib import Path
 import click
 
 from rx.compression import CompressionFormat, detect_compression, is_compound_archive
-from rx.file_utils import is_text_file
-from rx.seekable_index import build_index, get_index_info, get_or_build_index
+from rx.seekable_index import build_index, get_index_info
 from rx.seekable_zstd import (
     DEFAULT_COMPRESSION_LEVEL,
     DEFAULT_FRAME_SIZE_BYTES,

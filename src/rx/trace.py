@@ -21,7 +21,7 @@ from rx.index import get_large_file_threshold_bytes
 from rx.models import ContextLine, FileScannedPayload, MatchFoundPayload, ParseResult, Submatch
 from rx.rg_json import RgContextEvent, RgMatchEvent, parse_rg_json_event
 from rx.seekable_index import get_or_build_index
-from rx.seekable_zstd import decompress_frame, is_seekable_zstd, read_seek_table
+from rx.seekable_zstd import is_seekable_zstd, read_seek_table
 from rx.trace_cache import (
     build_cache_from_matches,
     get_cached_matches,

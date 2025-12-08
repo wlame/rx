@@ -17,7 +17,6 @@ import hashlib
 import json
 import logging
 import os
-import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
@@ -27,8 +26,6 @@ from rx.compression import (
     CompressionFormat,
     decompress_to_stdout,
     detect_compression,
-    get_decompressor_command,
-    is_compressed,
 )
 
 logger = logging.getLogger(__name__)

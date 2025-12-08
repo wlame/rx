@@ -19,12 +19,11 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 # Import noop prometheus stub by default (CLI mode)
 # Real prometheus is only imported in web.py for server mode
 from rx.cli import prometheus as prom
-from rx.utils import NEWLINE_SYMBOL, get_int_env
+from rx.utils import get_int_env
 
 logger = logging.getLogger(__name__)
 

@@ -1,9 +1,5 @@
 """Tests for seekable zstd compression module."""
 
-import os
-import struct
-import tempfile
-from pathlib import Path
 
 import pytest
 
@@ -11,14 +7,12 @@ from rx.seekable_zstd import (
     DEFAULT_COMPRESSION_LEVEL,
     DEFAULT_FRAME_SIZE_BYTES,
     SEEK_TABLE_FOOTER_MAGIC,
-    SEEKABLE_MAGIC,
     FrameInfo,
     SeekableZstdInfo,
     check_t2sz_available,
     check_zstd_available,
     create_seekable_zstd,
     decompress_frame,
-    decompress_frames,
     decompress_range,
     find_frame_for_offset,
     find_frames_for_range,

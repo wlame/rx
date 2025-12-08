@@ -3,6 +3,7 @@ import logging
 import os
 import platform
 from contextlib import asynccontextmanager
+from functools import partial
 from time import time
 
 import anyio
@@ -17,13 +18,11 @@ from rx import file_utils as file_utils_module
 # Import real prometheus for server mode and swap it into file_utils module
 from rx import prometheus as prom
 from rx.__version__ import __version__
-from rx.analyse import analyse_path, calculate_regex_complexity
+from rx.analyse import analyse_path
 from rx.compressed_index import get_decompressed_content_at_line, get_or_build_compressed_index
 from rx.compression import CompressionFormat, detect_compression, is_compressed
 from rx.file_utils import get_context, get_context_by_lines, validate_file
 from rx.hooks import (
-    DISABLE_CUSTOM_HOOKS,
-    HookConfig,
     call_hook_async,
     generate_request_id,
     get_effective_hooks,
@@ -34,11 +33,8 @@ from rx.models import (
     AnalyseResponse,
     ComplexityResponse,
     CompressRequest,
-    FileScannedPayload,
-    HealthResponse,
     IndexRequest,
     Match,
-    MatchFoundPayload,
     RequestInfo,
     SamplesResponse,
     TaskResponse,
@@ -47,17 +43,18 @@ from rx.models import (
     TraceResponse,
 )
 from rx.path_security import (
-    get_search_root,
     get_search_roots,
     set_search_root,
     set_search_roots,
     validate_path_within_root,
     validate_paths_within_root,
 )
-from rx.request_store import increment_hook_counter, store_request, update_request
-from rx.seekable_zstd import DEFAULT_COMPRESSION_LEVEL, DEFAULT_FRAME_SIZE_BYTES, create_seekable_zstd
+from rx.regex import calculate_regex_complexity
+from rx.request_store import store_request, update_request
+from rx.seekable_zstd import create_seekable_zstd
 from rx.task_manager import TaskManager
 from rx.trace import HookCallbacks, parse_paths
+
 
 # Replace the noop prometheus in file_utils module with real one
 file_utils_module.prom = prom
@@ -89,31 +86,31 @@ async def lifespan(app: FastAPI):
             search_roots = [search_root]
     app.state.search_roots = search_roots
     if len(search_roots) == 1:
-        logger.info(f"Search root: {search_roots[0]}")
+        logger.info(f'Search root: {search_roots[0]}')
     else:
-        logger.info(f"Search roots ({len(search_roots)}): {', '.join(str(r) for r in search_roots)}")
+        logger.info(f'Search roots ({len(search_roots)}): {", ".join(str(r) for r in search_roots)}')
 
     # Startup: check for ripgrep
     try:
         rg = sh.Command('rg')
         rg_path = rg._path
-        logger.info(f"ripgrep found at: {rg_path}")
+        logger.info(f'ripgrep found at: {rg_path}')
         app.state.rg = rg
         app.state.rg_path = rg_path
     except sh.CommandNotFound:
         logger.warning(
-            "ripgrep not found. Install it:\n"
-            "  macOS: brew install ripgrep\n"
-            "  Ubuntu/Debian: apt install ripgrep\n"
-            "  Fedora: dnf install ripgrep\n"
-            "  Or use Docker image with ripgrep pre-installed"
+            'ripgrep not found. Install it:\n'
+            '  macOS: brew install ripgrep\n'
+            '  Ubuntu/Debian: apt install ripgrep\n'
+            '  Fedora: dnf install ripgrep\n'
+            '  Or use Docker image with ripgrep pre-installed'
         )
         app.state.rg = None
         app.state.rg_path = None
 
     # Startup: initialize task manager for background tasks
     app.state.task_manager = TaskManager()
-    logger.info("Task manager initialized")
+    logger.info('Task manager initialized')
 
     # Startup: schedule periodic task cleanup
     async def cleanup_tasks_periodically():
@@ -121,7 +118,7 @@ async def lifespan(app: FastAPI):
             await asyncio.sleep(300)  # Every 5 minutes
             count = await app.state.task_manager.cleanup_old_tasks()
             if count > 0:
-                logger.info(f"Cleaned up {count} old tasks")
+                logger.info(f'Cleaned up {count} old tasks')
 
     cleanup_task = asyncio.create_task(cleanup_tasks_periodically())
 
@@ -136,7 +133,7 @@ async def lifespan(app: FastAPI):
         pass
 
     # Shutdown: cleanup if needed
-    logger.info("Shutting down rx")
+    logger.info('Shutting down rx')
 
 
 app = FastAPI(
@@ -174,13 +171,13 @@ app = FastAPI(
     4. **Regex Testing**: Analyze regex complexity before production use
     """,
     contact={
-        "name": "RxTracer API Support",
-        "url": "https://github.com/wlame/rx-tool",
+        'name': 'RxTracer API Support',
+        'url': 'https://github.com/wlame/rx-tool',
     },
-    license_info={"name": "MIT"},
+    license_info={'name': 'MIT'},
     lifespan=lifespan,
-    docs_url="/docs",
-    redoc_url="/redoc",
+    docs_url='/docs',
+    redoc_url='/redoc',
 )
 
 
@@ -323,46 +320,46 @@ async def metrics():
 @app.get(
     '/v1/trace',
     tags=['Search'],
-    summary="Search file for regex patterns (supports multiple patterns)",
+    summary='Search file for regex patterns (supports multiple patterns)',
     response_model=TraceResponse,
     responses={
-        200: {"description": "Successfully found matches"},
-        400: {"description": "Invalid regex pattern or binary file"},
-        404: {"description": "File not found"},
-        503: {"description": "ripgrep not available"},
+        200: {'description': 'Successfully found matches'},
+        400: {'description': 'Invalid regex pattern or binary file'},
+        404: {'description': 'File not found'},
+        503: {'description': 'ripgrep not available'},
     },
 )
 async def trace(
     path: list[str] = Query(
         ...,
-        description="File or directory paths to search (can specify multiple)",
-        examples=["/var/log/app.log", "/var/log/nginx"],
+        description='File or directory paths to search (can specify multiple)',
+        examples=['/var/log/app.log', '/var/log/nginx'],
     ),
     regexp: list[str] = Query(
-        ..., description="Regular expression patterns to search for (can specify multiple)", examples=["error.*failed"]
+        ..., description='Regular expression patterns to search for (can specify multiple)', examples=['error.*failed']
     ),
     max_results: int | None = Query(
-        None, description="Maximum number of results to return (optional)", ge=1, examples=[100]
+        None, description='Maximum number of results to return (optional)', ge=1, examples=[100]
     ),
     request_id: str | None = Query(
         None,
-        description="Custom request ID (UUID v7 auto-generated if not provided)",
-        examples=["01936c8e-7b2a-7000-8000-000000000001"],
+        description='Custom request ID (UUID v7 auto-generated if not provided)',
+        examples=['01936c8e-7b2a-7000-8000-000000000001'],
     ),
     hook_on_file: str | None = Query(
         None,
-        description="URL to call (GET) when file scan completes",
-        examples=["https://example.com/hooks/file-scanned"],
+        description='URL to call (GET) when file scan completes',
+        examples=['https://example.com/hooks/file-scanned'],
     ),
     hook_on_match: str | None = Query(
         None,
-        description="URL to call (GET) for each match found. Requires max_results to be set.",
-        examples=["https://example.com/hooks/match-found"],
+        description='URL to call (GET) for each match found. Requires max_results to be set.',
+        examples=['https://example.com/hooks/match-found'],
     ),
     hook_on_complete: str | None = Query(
         None,
-        description="URL to call (GET) when trace completes",
-        examples=["https://example.com/hooks/trace-complete"],
+        description='URL to call (GET) when trace completes',
+        examples=['https://example.com/hooks/trace-complete'],
     ),
 ) -> TraceResponse:
     """
@@ -395,7 +392,7 @@ async def trace(
     if not app.state.rg:
         prom.record_error('service_unavailable')
         prom.record_http_response('GET', '/v1/trace', 503)
-        raise HTTPException(status_code=503, detail="ripgrep is not available on this system")
+        raise HTTPException(status_code=503, detail='ripgrep is not available on this system')
 
     # Validate paths are within search root (security check)
     try:
@@ -416,8 +413,8 @@ async def trace(
         prom.record_http_response('GET', '/v1/trace', 400)
         raise HTTPException(
             status_code=400,
-            detail="max_results is required when hook_on_match is configured. "
-            "This prevents accidentally triggering millions of HTTP calls.",
+            detail='max_results is required when hook_on_match is configured. '
+            'This prevents accidentally triggering millions of HTTP calls.',
         )
 
     # Check if all paths exist
@@ -425,7 +422,7 @@ async def trace(
         if not os.path.exists(p):
             prom.record_error('file_not_found')
             prom.record_http_response('GET', '/v1/trace', 404)
-            raise HTTPException(status_code=404, detail=f"Path not found: {p}")
+            raise HTTPException(status_code=404, detail=f'Path not found: {p}')
 
     # Generate or use provided request_id
     req_id = request_id or generate_request_id()
@@ -474,14 +471,16 @@ async def trace(
         time_before = time()
         # Offload blocking I/O to thread pool to keep event loop responsive
         result = await anyio.to_thread.run_sync(
-            parse_paths,
-            path,
-            regexp,
-            max_results,
-            None,  # rg_extra_args
-            0,  # context_before - No context in API by default (use /v1/samples for that)
-            0,  # context_after
-            hook_callbacks,  # hooks
+            partial(
+                parse_paths,
+                paths=path,
+                regexps=regexp,
+                max_results=max_results,
+                rg_extra_args=None,
+                context_before=0,  # No context in API by default (use /v1/samples for that)
+                context_after=0,
+                hooks=hook_callbacks,
+            )
         )
         parsing_time = time() - time_before
 
@@ -543,11 +542,11 @@ async def trace(
         prom.record_http_response('GET', '/v1/trace', 400)
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error(f"Unexpected error: {str(e)}")
+        logger.error(f'Unexpected error: {e!s}')
         prom.record_error('internal_error')
         prom.record_trace_request('error', 0, 0, 0, len(regexp), 0, 0)
         prom.record_http_response('GET', '/v1/trace', 500)
-        raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f'Internal error: {e!s}')
 
     # Build response using ID-based structure
     response = TraceResponse(
@@ -569,16 +568,16 @@ async def trace(
 @app.get(
     '/v1/complexity',
     tags=['Analysis'],
-    summary="EXPERIMENTAL! Analyze regex complexity",
+    summary='EXPERIMENTAL! Analyze regex complexity',
     response_model=ComplexityResponse,
     responses={
-        200: {"description": "Complexity analysis completed"},
-        500: {"description": "Internal error during analysis"},
+        200: {'description': 'Complexity analysis completed'},
+        500: {'description': 'Internal error during analysis'},
     },
 )
 async def complexity(
     regex: str = Query(
-        ..., description="Regular expression pattern to analyze", examples=["(a+)+", ".*.*", "^[a-z]+$"]
+        ..., description='Regular expression pattern to analyze', examples=['(a+)+', '.*.*', '^[a-z]+$']
     ),
 ) -> dict:
     """
@@ -620,28 +619,28 @@ async def complexity(
 
         return result
     except Exception as e:
-        logger.error(f"Error analyzing regex complexity: {str(e)}")
+        logger.error(f'Error analyzing regex complexity: {e!s}')
         prom.record_error('internal_error')
         prom.record_http_response('GET', '/v1/complexity', 500)
-        raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f'Internal error: {e!s}')
 
 
 @app.get(
     '/v1/analyse',
     tags=['Analysis'],
-    summary="Analyze files",
+    summary='Analyze files',
     response_model=AnalyseResponse,
     responses={
-        200: {"description": "File analysis completed"},
-        404: {"description": "Path not found"},
-        500: {"description": "Internal error during analysis"},
+        200: {'description': 'File analysis completed'},
+        404: {'description': 'Path not found'},
+        500: {'description': 'Internal error during analysis'},
     },
 )
 async def analyse(
     path: str | list[str] = Query(
-        ..., description="File or directory path(s) to analyze", examples=["/var/log/app.log"]
+        ..., description='File or directory path(s) to analyze', examples=['/var/log/app.log']
     ),
-    max_workers: int = Query(10, description="Maximum number of parallel workers", ge=1, le=50, examples=[10]),
+    max_workers: int = Query(10, description='Maximum number of parallel workers', ge=1, le=50, examples=[10]),
 ) -> dict:
     """
     Analyze files to extract metadata and statistics.
@@ -681,11 +680,17 @@ async def analyse(
             if not os.path.exists(p):
                 prom.record_error('not_found')
                 prom.record_http_response('GET', '/v1/analyse', 404)
-                raise HTTPException(status_code=404, detail=f"Path not found: {p}")
+                raise HTTPException(status_code=404, detail=f'Path not found: {p}')
 
         time_before = time()
         # Offload blocking file analysis to thread pool
-        result = await anyio.to_thread.run_sync(analyse_path, paths, max_workers)
+        result = await anyio.to_thread.run_sync(
+            partial(
+                analyse_path,
+                paths=paths,
+                max_workers=max_workers,
+            )
+        )
         duration = time() - time_before
 
         # Record metrics
@@ -711,34 +716,34 @@ async def analyse(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error analyzing files: {str(e)}")
+        logger.error(f'Error analyzing files: {e!s}')
         prom.record_error('internal_error')
         prom.record_analyse_request(
             status='error', duration=0, num_files=0, num_skipped=0, total_bytes=0, num_workers=max_workers
         )
         prom.record_http_response('GET', '/v1/analyse', 500)
-        raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f'Internal error: {e!s}')
 
 
 @app.get(
     '/v1/samples',
     tags=['Context'],
-    summary="Get context lines around byte offsets or line numbers",
+    summary='Get context lines around byte offsets or line numbers',
     response_model=SamplesResponse,
     responses={
-        200: {"description": "Successfully retrieved context lines"},
-        400: {"description": "Invalid offsets/lines format or negative context values"},
-        404: {"description": "File not found"},
-        503: {"description": "ripgrep not available"},
+        200: {'description': 'Successfully retrieved context lines'},
+        400: {'description': 'Invalid offsets/lines format or negative context values'},
+        404: {'description': 'File not found'},
+        503: {'description': 'ripgrep not available'},
     },
 )
 async def samples(
-    path: str = Query(..., description="File path to read from", examples=["/var/log/app.log"]),
-    offsets: str = Query(None, description="Comma-separated list of byte offsets", examples=["123,456,789"]),
-    lines: str = Query(None, description="Comma-separated list of line numbers (1-based)", examples=["100,200,300"]),
-    context: int = Query(None, description="Number of context lines before and after (sets both)", ge=0, examples=[3]),
-    before_context: int = Query(None, description="Number of lines before each offset", ge=0, examples=[2]),
-    after_context: int = Query(None, description="Number of lines after each offset", ge=0, examples=[5]),
+    path: str = Query(..., description='File path to read from', examples=['/var/log/app.log']),
+    offsets: str = Query(None, description='Comma-separated list of byte offsets', examples=['123,456,789']),
+    lines: str = Query(None, description='Comma-separated list of line numbers (1-based)', examples=['100,200,300']),
+    context: int = Query(None, description='Number of context lines before and after (sets both)', ge=0, examples=[3]),
+    before_context: int = Query(None, description='Number of lines before each offset', ge=0, examples=[2]),
+    after_context: int = Query(None, description='Number of lines after each offset', ge=0, examples=[5]),
 ) -> dict:
     """
     Extract context lines around specific byte offsets or line numbers in a file.
@@ -763,7 +768,7 @@ async def samples(
     if not app.state.rg:
         prom.record_error('service_unavailable')
         prom.record_http_response('GET', '/v1/samples', 503)
-        raise HTTPException(status_code=503, detail="ripgrep is not available on this system")
+        raise HTTPException(status_code=503, detail='ripgrep is not available on this system')
 
     # Validate path is within search root (security check)
     try:
@@ -811,7 +816,7 @@ async def samples(
         except ValueError:
             prom.record_error('invalid_offsets')
             prom.record_http_response('GET', '/v1/samples', 400)
-            raise HTTPException(status_code=400, detail="Invalid offsets format. Expected comma-separated integers.")
+            raise HTTPException(status_code=400, detail='Invalid offsets format. Expected comma-separated integers.')
     else:
         use_lines = True
         try:
@@ -819,7 +824,7 @@ async def samples(
         except ValueError:
             prom.record_error('invalid_lines')
             prom.record_http_response('GET', '/v1/samples', 400)
-            raise HTTPException(status_code=400, detail="Invalid lines format. Expected comma-separated integers.")
+            raise HTTPException(status_code=400, detail='Invalid lines format. Expected comma-separated integers.')
 
     before = before_context if before_context is not None else context if context is not None else 3
     after = after_context if after_context is not None else context if context is not None else 3
@@ -841,7 +846,7 @@ async def samples(
         if not os.path.exists(path):
             prom.record_error('file_not_found')
             prom.record_http_response('GET', '/v1/samples', 404)
-            raise HTTPException(status_code=404, detail=f"File not found: {path}")
+            raise HTTPException(status_code=404, detail=f'File not found: {path}')
 
     # Get context (offload blocking file I/O)
     try:
@@ -855,7 +860,14 @@ async def samples(
             context_data: dict[int, list[str]] = {}
             for line_num in line_list:
                 lines_content = await anyio.to_thread.run_sync(
-                    get_decompressed_content_at_line, path, line_num, before, after, index_data
+                    partial(
+                        get_decompressed_content_at_line,
+                        source_path=path,
+                        line_number=line_num,
+                        context_before=before,
+                        context_after=after,
+                        index_data=index_data,
+                    )
                 )
                 context_data[line_num] = lines_content
 
@@ -891,27 +903,55 @@ async def samples(
         index_data = await anyio.to_thread.run_sync(load_index, index_path)
 
         if use_lines:
-            context_data = await anyio.to_thread.run_sync(get_context_by_lines, path, line_list, before, after)
+            context_data = await anyio.to_thread.run_sync(
+                partial(
+                    get_context_by_lines,
+                    filename=path,
+                    line_numbers=line_list,
+                    before_context=before,
+                    after_context=after,
+                )
+            )
             num_items = len(line_list)
 
             # Calculate byte offsets for each line number
             line_to_offset = {}
             for line_num in line_list:
                 byte_offset = await anyio.to_thread.run_sync(
-                    calculate_exact_offset_for_line, path, line_num, index_data
+                    partial(
+                        calculate_exact_offset_for_line,
+                        filename=path,
+                        target_line=line_num,
+                        index_data=index_data,
+                    )
                 )
                 line_to_offset[str(line_num)] = byte_offset
 
             offset_mapping = {}
             line_mapping = line_to_offset
         else:
-            context_data = await anyio.to_thread.run_sync(get_context, path, offset_list, before, after)
+            context_data = await anyio.to_thread.run_sync(
+                partial(
+                    get_context,
+                    filename=path,
+                    offsets=offset_list,
+                    before_context=before,
+                    after_context=after,
+                )
+            )
             num_items = len(offset_list)
 
             # Calculate line numbers for each byte offset
             offset_to_line = {}
             for offset in offset_list:
-                line_num = await anyio.to_thread.run_sync(calculate_exact_line_for_offset, path, offset, index_data)
+                line_num = await anyio.to_thread.run_sync(
+                    partial(
+                        calculate_exact_line_for_offset,
+                        filename=path,
+                        target_offset=offset,
+                        index_data=index_data,
+                    )
+                )
                 offset_to_line[str(offset)] = line_num
 
             offset_mapping = offset_to_line
@@ -942,12 +982,12 @@ async def samples(
         prom.record_http_response('GET', '/v1/samples', 400)
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error(f"Unexpected error: {str(e)}")
+        logger.error(f'Unexpected error: {e!s}')
         prom.record_error('internal_error')
         num_items = len(line_list) if use_lines else len(offset_list)
         prom.record_samples_request('error', 0, num_items, before, after)
         prom.record_http_response('GET', '/v1/samples', 500)
-        raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f'Internal error: {e!s}')
 
 
 # Helper function to parse frame size
@@ -980,19 +1020,18 @@ async def run_compress_task(
     normalized_path: str,
 ):
     """Run compression in background."""
-    import os
 
     from rx.seekable_index import build_index as build_seekable_index
     from rx.task_manager import TaskStatus
 
     try:
         await task_manager.update_task(task_id, status=TaskStatus.RUNNING)
-        logger.info(f"[Task {task_id}] Starting compression of {normalized_path}")
+        logger.info(f'[Task {task_id}] Starting compression of {normalized_path}')
 
         # Determine output path
         output_path = request.output_path
         if not output_path:
-            output_path = f"{normalized_path}.zst"
+            output_path = f'{normalized_path}.zst'
 
         # Parse frame size
         frame_size_bytes = parse_frame_size(request.frame_size)
@@ -1000,13 +1039,15 @@ async def run_compress_task(
         # Run compression in thread pool (blocking operation)
         start_time = time()
         result = await anyio.to_thread.run_sync(
-            create_seekable_zstd,
-            normalized_path,
-            output_path,
-            frame_size_bytes,
-            request.compression_level,
-            None,  # threads (auto)
-            None,  # progress callback
+            partial(
+                create_seekable_zstd,
+                input_path=normalized_path,
+                output_path=output_path,
+                frame_size_bytes=frame_size_bytes,
+                compression_level=request.compression_level,
+                threads=None,  # auto
+                progress_callback=None,
+            )
         )
         elapsed = time() - start_time
 
@@ -1014,11 +1055,13 @@ async def run_compress_task(
         index_built = False
         total_lines = None
         if request.build_index and result:
-            logger.info(f"[Task {task_id}] Building index for {output_path}")
+            logger.info(f'[Task {task_id}] Building index for {output_path}')
             index_result = await anyio.to_thread.run_sync(
-                build_seekable_index,
-                output_path,
-                None,  # progress callback
+                partial(
+                    build_seekable_index,
+                    zst_path=output_path,
+                    progress_callback=None,
+                )
             )
             if index_result:
                 index_built = True
@@ -1044,10 +1087,10 @@ async def run_compress_task(
             completed_at=datetime.now(timezone.utc),
             result=task_result,
         )
-        logger.info(f"[Task {task_id}] Compression completed in {elapsed:.2f}s")
+        logger.info(f'[Task {task_id}] Compression completed in {elapsed:.2f}s')
 
     except Exception as e:
-        logger.error(f"[Task {task_id}] Compression failed: {str(e)}")
+        logger.error(f'[Task {task_id}] Compression failed: {e!s}')
         await task_manager.update_task(
             task_id,
             status=TaskStatus.FAILED,
@@ -1071,7 +1114,7 @@ async def run_index_task(
 
     try:
         await task_manager.update_task(task_id, status=TaskStatus.RUNNING)
-        logger.info(f"[Task {task_id}] Starting indexing of {normalized_path}")
+        logger.info(f'[Task {task_id}] Starting indexing of {normalized_path}')
 
         start_time = time()
 
@@ -1079,9 +1122,11 @@ async def run_index_task(
         if is_seekable_zstd(normalized_path):
             # Build seekable zstd index
             result = await anyio.to_thread.run_sync(
-                build_seekable_index,
-                normalized_path,
-                None,  # progress callback
+                partial(
+                    build_seekable_index,
+                    zst_path=normalized_path,
+                    progress_callback=None,
+                )
             )
             index_path = get_index_path(normalized_path)  # This will need seekable version
             line_count = result.total_lines if result else None
@@ -1089,9 +1134,11 @@ async def run_index_task(
         else:
             # Build regular file index
             result = await anyio.to_thread.run_sync(
-                create_index_file,
-                normalized_path,
-                request.force,
+                partial(
+                    create_index_file,
+                    source_path=normalized_path,
+                    force=request.force,
+                )
             )
             index_path = get_index_path(normalized_path)
             line_count = result.get('analysis', {}).get('line_count') if result else None
@@ -1117,10 +1164,10 @@ async def run_index_task(
             completed_at=datetime.now(timezone.utc),
             result=task_result,
         )
-        logger.info(f"[Task {task_id}] Indexing completed in {elapsed:.2f}s")
+        logger.info(f'[Task {task_id}] Indexing completed in {elapsed:.2f}s')
 
     except Exception as e:
-        logger.error(f"[Task {task_id}] Indexing failed: {str(e)}")
+        logger.error(f'[Task {task_id}] Indexing failed: {e!s}')
         await task_manager.update_task(
             task_id,
             status=TaskStatus.FAILED,
@@ -1132,14 +1179,14 @@ async def run_index_task(
 @app.post(
     '/v1/compress',
     tags=['Operations'],
-    summary="Compress file to seekable zstd format (background task)",
+    summary='Compress file to seekable zstd format (background task)',
     response_model=TaskResponse,
     responses={
-        200: {"description": "Compression task started"},
-        400: {"description": "Invalid parameters"},
-        403: {"description": "Path outside search roots"},
-        404: {"description": "File not found"},
-        409: {"description": "Compression already in progress for this file"},
+        200: {'description': 'Compression task started'},
+        400: {'description': 'Invalid parameters'},
+        403: {'description': 'Path outside search roots'},
+        404: {'description': 'File not found'},
+        409: {'description': 'Compression already in progress for this file'},
     },
 )
 async def compress(request: CompressRequest):
@@ -1160,7 +1207,6 @@ async def compress(request: CompressRequest):
     Task information with task_id for status polling.
     """
     import os
-    from datetime import timezone
 
     # Validate path security
     try:
@@ -1170,20 +1216,20 @@ async def compress(request: CompressRequest):
 
     # Check if file exists
     if not os.path.exists(normalized_path):
-        raise HTTPException(status_code=404, detail=f"File not found: {request.input_path}")
+        raise HTTPException(status_code=404, detail=f'File not found: {request.input_path}')
 
     # Check if output already exists (unless force)
-    output_path = request.output_path if request.output_path else f"{normalized_path}.zst"
+    output_path = request.output_path if request.output_path else f'{normalized_path}.zst'
     if not request.force and os.path.exists(output_path):
-        raise HTTPException(status_code=400, detail=f"Output file already exists: {output_path}")
+        raise HTTPException(status_code=400, detail=f'Output file already exists: {output_path}')
 
     # Create task
-    task, is_new = await app.state.task_manager.create_task(normalized_path, "compress")
+    task, is_new = await app.state.task_manager.create_task(normalized_path, 'compress')
 
     if not is_new:
         # Task already running
         raise HTTPException(
-            status_code=409, detail=f"Compression already in progress for {request.input_path} (task: {task.task_id})"
+            status_code=409, detail=f'Compression already in progress for {request.input_path} (task: {task.task_id})'
         )
 
     # Start background task
@@ -1200,7 +1246,7 @@ async def compress(request: CompressRequest):
     return TaskResponse(
         task_id=task.task_id,
         status=task.status.value,
-        message=f"Compression task started for {request.input_path}",
+        message=f'Compression task started for {request.input_path}',
         path=normalized_path,
         started_at=task.started_at.isoformat() if task.started_at else None,
     )
@@ -1209,14 +1255,14 @@ async def compress(request: CompressRequest):
 @app.post(
     '/v1/index',
     tags=['Operations'],
-    summary="Build line index for file (background task)",
+    summary='Build line index for file (background task)',
     response_model=TaskResponse,
     responses={
-        200: {"description": "Indexing task started"},
-        400: {"description": "Invalid parameters"},
-        403: {"description": "Path outside search roots"},
-        404: {"description": "File not found"},
-        409: {"description": "Indexing already in progress for this file"},
+        200: {'description': 'Indexing task started'},
+        400: {'description': 'Invalid parameters'},
+        403: {'description': 'Path outside search roots'},
+        404: {'description': 'File not found'},
+        409: {'description': 'Indexing already in progress for this file'},
     },
 )
 async def index(request: IndexRequest):
@@ -1234,7 +1280,6 @@ async def index(request: IndexRequest):
     Task information with task_id for status polling.
     """
     import os
-    from datetime import timezone
 
     # Validate path security
     try:
@@ -1244,23 +1289,23 @@ async def index(request: IndexRequest):
 
     # Check if file exists
     if not os.path.exists(normalized_path):
-        raise HTTPException(status_code=404, detail=f"File not found: {request.path}")
+        raise HTTPException(status_code=404, detail=f'File not found: {request.path}')
 
     # Check file size threshold
     threshold_bytes = (request.threshold * 1024 * 1024) if request.threshold else get_large_file_threshold_bytes()
     file_size = os.path.getsize(normalized_path)
     if file_size < threshold_bytes:
         raise HTTPException(
-            status_code=400, detail=f"File size {file_size} bytes is below threshold {threshold_bytes} bytes"
+            status_code=400, detail=f'File size {file_size} bytes is below threshold {threshold_bytes} bytes'
         )
 
     # Create task
-    task, is_new = await app.state.task_manager.create_task(normalized_path, "index")
+    task, is_new = await app.state.task_manager.create_task(normalized_path, 'index')
 
     if not is_new:
         # Task already running
         raise HTTPException(
-            status_code=409, detail=f"Indexing already in progress for {request.path} (task: {task.task_id})"
+            status_code=409, detail=f'Indexing already in progress for {request.path} (task: {task.task_id})'
         )
 
     # Start background task
@@ -1277,7 +1322,7 @@ async def index(request: IndexRequest):
     return TaskResponse(
         task_id=task.task_id,
         status=task.status.value,
-        message=f"Indexing task started for {request.path}",
+        message=f'Indexing task started for {request.path}',
         path=normalized_path,
         started_at=task.started_at.isoformat() if task.started_at else None,
     )
@@ -1286,11 +1331,11 @@ async def index(request: IndexRequest):
 @app.get(
     '/v1/tasks/{task_id}',
     tags=['Operations'],
-    summary="Get status of background task",
+    summary='Get status of background task',
     response_model=TaskStatusResponse,
     responses={
-        200: {"description": "Task status retrieved"},
-        404: {"description": "Task not found"},
+        200: {'description': 'Task status retrieved'},
+        404: {'description': 'Task not found'},
     },
 )
 async def get_task_status(task_id: str):
@@ -1306,7 +1351,7 @@ async def get_task_status(task_id: str):
     task = await app.state.task_manager.get_task(task_id)
 
     if not task:
-        raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
+        raise HTTPException(status_code=404, detail=f'Task not found: {task_id}')
 
     return TaskStatusResponse(
         task_id=task.task_id,

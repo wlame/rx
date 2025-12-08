@@ -1,13 +1,9 @@
 """Tests for seekable index module."""
 
-import json
-import os
-import tempfile
-from pathlib import Path
 
 import pytest
 
-from rx.seekable_zstd import check_t2sz_available, create_seekable_zstd, is_seekable_zstd
+from rx.seekable_zstd import check_t2sz_available, create_seekable_zstd
 
 # Check if zstandard module is available
 try:
@@ -28,10 +24,7 @@ from rx.seekable_index import (
     build_index,
     delete_index,
     find_frame_for_line,
-    find_frames_for_byte_range,
     find_frames_for_lines,
-    get_frame_info,
-    get_index,
     get_index_dir,
     get_index_info,
     get_index_path,

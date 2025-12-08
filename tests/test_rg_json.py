@@ -1,6 +1,5 @@
 """Tests for ripgrep JSON event parsing"""
 
-import pytest
 from rx.rg_json import (
     parse_rg_json_event,
     RgMatchEvent,

@@ -6,6 +6,16 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
+
+def human_readable_size(size_bytes: int) -> str:
+    """Convert bytes to human-readable format."""
+    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+        if size_bytes < 1024:
+            return f"{size_bytes:.2f} {unit}"
+        size_bytes /= 1024
+    return f"{size_bytes:.2f} PB"
+
+
 # Trace Cache Models
 
 

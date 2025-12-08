@@ -1,10 +1,8 @@
 """Tests for compressed file index management."""
 
 import gzip
-import json
 import os
 import tempfile
-from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,7 +10,6 @@ import pytest
 
 from rx.compressed_index import (
     INDEX_VERSION,
-    LINE_SAMPLE_INTERVAL,
     build_compressed_index,
     clear_compressed_indexes,
     delete_compressed_index,

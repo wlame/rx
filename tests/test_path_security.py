@@ -1,9 +1,7 @@
 """Tests for path security validation module."""
 
-import os
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -423,7 +421,6 @@ class TestValidatePathWithinMultipleRoots:
 
     def setup_method(self):
         """Set up test fixtures with multiple roots."""
-        import shutil
 
         self.tmp_dir = tempfile.mkdtemp()
         self.base = Path(self.tmp_dir)

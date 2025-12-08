@@ -2,12 +2,10 @@
 
 import os
 from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
-import pytest
 
 from rx.hooks import (
-    HOOK_TIMEOUT_SECONDS,
     HookConfig,
     call_hook_sync,
     generate_request_id,

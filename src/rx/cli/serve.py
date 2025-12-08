@@ -84,7 +84,6 @@ def serve_command(host, port, search_roots):
     os.environ['RX_SEARCH_ROOTS'] = os.pathsep.join(str(r) for r in resolved_roots)
 
     # Import the FastAPI app (this triggers prometheus swap)
-    from rx.web import app
 
     # Get configuration from environment variables
     log_level = get_str_env('RX_LOG_LEVEL', 'info').lower()

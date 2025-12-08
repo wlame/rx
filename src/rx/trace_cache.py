@@ -26,13 +26,11 @@ import re
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 from rx.cli import prometheus as prom
 from rx.file_utils import get_context_by_lines
 from rx.index import get_large_file_threshold_bytes
 from rx.models import ContextLine, Submatch
-from rx.utils import get_int_env
 
 logger = logging.getLogger(__name__)
 

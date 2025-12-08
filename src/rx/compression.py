@@ -10,7 +10,6 @@ Supported formats:
 - bzip2 (.bz2)
 """
 
-import os
 import shutil
 import subprocess
 from enum import Enum
@@ -336,3 +335,54 @@ def decompress_file(
         raise RuntimeError(f"Decompression failed with code {proc.returncode}: {stderr.decode()}")
 
     return stdout
+
+
+def decompress_to_file(
+    input_path: str | Path,
+    output_path: str | Path,
+    format: Optional[CompressionFormat] = None,
+) -> None:
+    """Decompress a file to the output path.
+
+    Args:
+        input_path: Path to compressed file
+        output_path: Path where decompressed file should be written
+        format: Compression format (auto-detected if not provided)
+
+    Raises:
+        ValueError: If file is not compressed or format unsupported
+        FileNotFoundError: If decompressor is not available
+        OSError: If decompression fails (e.g., no space left on device)
+    """
+    if format is None:
+        format = detect_compression(input_path)
+
+    if format == CompressionFormat.NONE:
+        raise ValueError(f"File is not compressed: {input_path}")
+
+    if not check_decompressor_available(format):
+        raise FileNotFoundError(
+            f"Decompressor for {format.value} not found. Please install: {DECOMPRESSOR_COMMANDS[format.value][0]}"
+        )
+
+    cmd = get_decompressor_command(format, input_path)
+
+    # Run decompression to file
+    try:
+        with open(output_path, "wb") as outfile:
+            result = subprocess.run(
+                cmd,
+                stdout=outfile,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            if result.returncode != 0:
+                error_msg = result.stderr.decode("utf-8", errors="replace")
+                raise OSError(f"Decompression failed: {error_msg}")
+    except OSError as e:
+        # Re-raise OSError (includes "No space left" errors)
+        raise
+    except Exception as e:
+        # Wrap other exceptions as OSError
+        raise OSError(f"Decompression failed: {e}") from e

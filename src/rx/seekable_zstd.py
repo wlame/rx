@@ -23,10 +23,8 @@ from typing import Callable, Optional
 
 from rx.compression import (
     CompressionFormat,
-    decompress_file,
     detect_compression,
     get_decompressor_command,
-    is_compressed,
 )
 
 logger = logging.getLogger(__name__)

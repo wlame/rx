@@ -4,7 +4,6 @@ import json
 import os
 import shutil
 import tempfile
-from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
@@ -17,7 +16,6 @@ from rx.analyse import (
 )
 from rx.cli.analyse import analyse_command
 from rx.models import AnalyseResponse, FileAnalysisResult
-from rx.path_security import set_search_root
 from rx.web import app
 
 

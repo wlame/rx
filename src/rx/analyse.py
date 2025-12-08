@@ -4,21 +4,17 @@ import logging
 import os
 import random
 import statistics
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from time import time
 from typing import Any
 
+from rx import index, seekable_index, seekable_zstd
+from rx.compression import decompress_to_file, detect_compression, is_compressed
 from rx.file_utils import is_text_file
-from rx.index import (
-    create_index_file,
-    get_index_path,
-    get_large_file_threshold_bytes,
-    is_index_valid,
-    load_index,
-)
-from rx.regex import calculate_regex_complexity
+
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +78,20 @@ class FileAnalysisState:
 
     # Line ending info
     line_ending: str | None = None  # "LF", "CRLF", "CR", or "mixed"
+
+    # Compression information
+    is_compressed: bool = False
+    compression_format: str | None = None
+    is_seekable_zstd: bool = False
+    compressed_size: int | None = None
+    decompressed_size: int | None = None
+    compression_ratio: float | None = None
+
+    # Index information
+    has_index: bool = False
+    index_path: str | None = None
+    index_valid: bool = False
+    index_checkpoint_count: int | None = None
 
     # Additional metrics can be added by plugins
     custom_metrics: dict[str, Any] = field(default_factory=dict)
@@ -147,6 +157,161 @@ class FileAnalyzer:
         """
         pass
 
+    def _dict_to_state(self, data: dict, file_id: str, filepath: str) -> FileAnalysisState:
+        """Convert cached dict to FileAnalysisState."""
+        return FileAnalysisState(
+            file_id=file_id,
+            filepath=filepath,
+            size_bytes=data.get('size_bytes', 0),
+            size_human=data.get('size_human', '0 B'),
+            is_text=data.get('is_text', False),
+            created_at=data.get('created_at'),
+            modified_at=data.get('modified_at'),
+            permissions=data.get('permissions'),
+            owner=data.get('owner'),
+            line_count=data.get('line_count'),
+            empty_line_count=data.get('empty_line_count'),
+            line_length_max=data.get('line_length_max'),
+            line_length_avg=data.get('line_length_avg'),
+            line_length_median=data.get('line_length_median'),
+            line_length_p95=data.get('line_length_p95'),
+            line_length_p99=data.get('line_length_p99'),
+            line_length_stddev=data.get('line_length_stddev'),
+            line_length_max_line_number=data.get('line_length_max_line_number'),
+            line_length_max_byte_offset=data.get('line_length_max_byte_offset'),
+            line_ending=data.get('line_ending'),
+            custom_metrics=data.get('custom_metrics', {}),
+            # Compression fields
+            is_compressed=data.get('is_compressed', False),
+            compression_format=data.get('compression_format'),
+            is_seekable_zstd=data.get('is_seekable_zstd', False),
+            compressed_size=data.get('compressed_size'),
+            decompressed_size=data.get('decompressed_size'),
+            compression_ratio=data.get('compression_ratio'),
+            # Index fields
+            has_index=data.get('has_index', False),
+            index_path=data.get('index_path'),
+            index_valid=data.get('index_valid', False),
+            index_checkpoint_count=data.get('index_checkpoint_count'),
+        )
+
+    def _state_to_dict(self, result: FileAnalysisState) -> dict:
+        """Convert FileAnalysisState to dict for caching."""
+        return {
+            'file': result.file_id,
+            'size_bytes': result.size_bytes,
+            'size_human': result.size_human,
+            'is_text': result.is_text,
+            'created_at': result.created_at,
+            'modified_at': result.modified_at,
+            'permissions': result.permissions,
+            'owner': result.owner,
+            'line_count': result.line_count,
+            'empty_line_count': result.empty_line_count,
+            'line_length_max': result.line_length_max,
+            'line_length_avg': result.line_length_avg,
+            'line_length_median': result.line_length_median,
+            'line_length_p95': result.line_length_p95,
+            'line_length_p99': result.line_length_p99,
+            'line_length_stddev': result.line_length_stddev,
+            'line_length_max_line_number': result.line_length_max_line_number,
+            'line_length_max_byte_offset': result.line_length_max_byte_offset,
+            'line_ending': result.line_ending,
+            'custom_metrics': result.custom_metrics,
+            # Compression fields
+            'is_compressed': result.is_compressed,
+            'compression_format': result.compression_format,
+            'is_seekable_zstd': result.is_seekable_zstd,
+            'compressed_size': result.compressed_size,
+            'decompressed_size': result.decompressed_size,
+            'compression_ratio': result.compression_ratio,
+            # Index fields
+            'has_index': result.has_index,
+            'index_path': result.index_path,
+            'index_valid': result.index_valid,
+            'index_checkpoint_count': result.index_checkpoint_count,
+        }
+
+    def _add_index_info(self, filepath: str, result: FileAnalysisState):
+        """Add index information to analysis result."""
+        try:
+            if seekable_zstd.seekable_zstd.is_seekable_zstd(filepath):
+                # Check for seekable zstd index
+                index_path = seekable_index.index.get_index_path(filepath)
+                if os.path.exists(index_path):
+                    result.has_index = True
+                    result.index_path = str(index_path)
+                    result.index_valid = seekable_index.is_index_valid(filepath)
+
+                    if result.index_valid:
+                        try:
+                            index_data = seekable_index.load_seekable_index(filepath)
+                            result.index_checkpoint_count = len(index_data.get('frames', []))
+                        except Exception as e:
+                            logger.warning(f"Failed to load seekable index: {e}")
+            else:
+                # Check for regular file index
+                index_path = index.index.get_index_path(filepath)
+                if os.path.exists(str(index_path)):
+                    result.has_index = True
+                    result.index_path = str(index_path)
+                    result.index_valid = index.is_index_valid(filepath)
+
+                    if result.index_valid:
+                        try:
+                            index_data = index.load_index(index_path)
+                            result.index_checkpoint_count = len(index_data.get('line_index', []))
+                        except Exception as e:
+                            logger.warning(f"Failed to load index: {e}")
+        except Exception as e:
+            logger.warning(f"Failed to add index info: {e}")
+
+    def _analyze_compressed_file(self, filepath: str, result: FileAnalysisState):
+        """Analyze compressed file by decompressing to /tmp and analyzing."""
+        temp_file = None
+        try:
+            # Create temp file
+            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as tf:
+                temp_file = tf.name
+
+            logger.info(f"Decompressing {filepath} to {temp_file}")
+
+            # Decompress to temp file
+            try:
+                decompress_to_file(filepath, temp_file)
+            except OSError as e:
+                if "No space left" in str(e) or "Disk quota exceeded" in str(e):
+                    logger.warning(f"No space left on device, skipping decompression of {filepath}")
+                    return
+                raise
+
+            # Get decompressed size
+            stat = os.stat(temp_file)
+            result.decompressed_size = stat.st_size
+
+            # Calculate compression ratio
+            if result.compressed_size and result.decompressed_size:
+                result.compression_ratio = result.decompressed_size / result.compressed_size
+
+            # Check if decompressed file is text
+            if is_text_file(temp_file):
+                result.is_text = True
+                # Analyze the decompressed content
+                self._analyze_text_file(temp_file, result)
+            else:
+                logger.info(f"Decompressed file is not text: {filepath}")
+
+        except Exception as e:
+            logger.error(f"Failed to analyze compressed file {filepath}: {e}")
+        finally:
+            # IMPORTANT: Clean up temp file
+            if temp_file and os.path.exists(temp_file):
+                try:
+                    os.remove(temp_file)
+                    logger.debug(f"Cleaned up temp file: {temp_file}")
+                except OSError as e:
+                    logger.warning(f"Failed to remove temp file {temp_file}: {e}")
+
     def _try_load_from_cache(self, filepath: str, file_id: str) -> FileAnalysisState | None:
         """Try to load analysis results from cached index.
 
@@ -160,10 +325,10 @@ class FileAnalyzer:
         if not self.use_index_cache:
             return None
 
-        if not is_index_valid(filepath):
+        if not index.is_index_valid(filepath):
             return None
 
-        index_data = load_index(get_index_path(filepath))
+        index_data = index.load_index(index.get_index_path(filepath))
         if index_data is None:
             return None
 
@@ -221,7 +386,26 @@ class FileAnalyzer:
         For large text files with valid cached indexes, analysis data is
         loaded from cache for better performance.
         """
-        # Try to use cached analysis first
+        # STEP 1: Try analyse_cache first (new cache system)
+        from rx.analyse_cache import load_cache, save_cache
+
+        cached = load_cache(filepath)
+        if cached:
+            logger.info(f"Loaded from analyse_cache: {filepath}")
+            # Convert dict back to FileAnalysisState
+            result = self._dict_to_state(cached, file_id, filepath)
+            # Still run hooks
+            try:
+                self.file_hook(filepath, result)
+            except Exception as e:
+                logger.warning(f"File hook failed: {e}")
+            try:
+                self.post_hook(result)
+            except Exception as e:
+                logger.warning(f"Post hook failed: {e}")
+            return result
+
+        # STEP 2: Try old index cache (keep existing logic)
         cached_result = self._try_load_from_cache(filepath, file_id)
         if cached_result is not None:
             # Still run hooks on cached result
@@ -235,6 +419,7 @@ class FileAnalyzer:
                 logger.warning(f"Post hook failed for {filepath}: {e}")
             return cached_result
 
+        # STEP 3: Fresh analysis
         try:
             stat_info = os.stat(filepath)
             size_bytes = stat_info.st_size
@@ -260,25 +445,57 @@ class FileAnalyzer:
             except (ImportError, KeyError):
                 result.owner = str(stat_info.st_uid)
 
-            # Run file-level hooks
+            # STEP 4: Detect compression (NEW)
+            if is_compressed(filepath):
+                result.is_compressed = True
+                comp_format = detect_compression(filepath)
+                result.compression_format = comp_format.value if comp_format else None
+                result.compressed_size = size_bytes
+
+                if seekable_zstd.is_seekable_zstd(filepath):
+                    result.is_seekable_zstd = True
+                    # Get decompressed size from seekable index if available
+                    try:
+                        index_data = seekable_index.load_index(filepath)
+                        if index_data:
+                            result.decompressed_size = index_data.get('decompressed_size_bytes')
+                            if result.decompressed_size and result.compressed_size:
+                                result.compression_ratio = result.decompressed_size / result.compressed_size
+                    except Exception as e:
+                        logger.debug(f"Could not get seekable zstd info: {e}")
+
+            # STEP 5: Run file-level hooks
             try:
                 self.file_hook(filepath, result)
             except Exception as e:
                 logger.warning(f"File hook failed for {filepath}: {e}")
 
-            # Analyze text files
+            # STEP 6: Analyze content
             if result.is_text:
                 self._analyze_text_file(filepath, result)
 
                 # Create index for large files
-                if size_bytes >= get_large_file_threshold_bytes():
+                if size_bytes >= index.get_large_file_threshold_bytes():
                     self._create_index_for_result(filepath, result)
+            elif result.is_compressed:
+                # NEW: Handle compressed files
+                self._analyze_compressed_file(filepath, result)
 
-            # Run post-processing hooks
+            # STEP 7: Add index information (NEW)
+            self._add_index_info(filepath, result)
+
+            # STEP 8: Run post-processing hooks
             try:
                 self.post_hook(result)
             except Exception as e:
                 logger.warning(f"Post hook failed for {filepath}: {e}")
+
+            # STEP 9: Save to analyse_cache (NEW)
+            try:
+                result_dict = self._state_to_dict(result)
+                save_cache(filepath, result_dict)
+            except Exception as e:
+                logger.warning(f"Failed to save cache: {e}")
 
             return result
 
@@ -301,7 +518,7 @@ class FileAnalyzer:
         try:
             logger.info(f"Creating index for large file: {filepath}")
             # Use create_index_file which will build a full index with line offsets
-            create_index_file(filepath, force=True)
+            index.create_index_file(filepath, force=True)
         except Exception as e:
             logger.warning(f"Failed to create index for {filepath}: {e}")
 
@@ -548,6 +765,18 @@ def analyse_path(paths: list[str], max_workers: int = 10) -> dict[str, Any]:
                 'line_length_max_byte_offset': r.line_length_max_byte_offset,
                 'line_ending': r.line_ending,
                 'custom_metrics': r.custom_metrics,
+                # Compression fields
+                'is_compressed': r.is_compressed,
+                'compression_format': r.compression_format,
+                'is_seekable_zstd': r.is_seekable_zstd,
+                'compressed_size': r.compressed_size,
+                'decompressed_size': r.decompressed_size,
+                'compression_ratio': r.compression_ratio,
+                # Index fields
+                'has_index': r.has_index,
+                'index_path': r.index_path,
+                'index_valid': r.index_valid,
+                'index_checkpoint_count': r.index_checkpoint_count,
             }
             for r in results
         ],
@@ -556,5 +785,4 @@ def analyse_path(paths: list[str], max_workers: int = 10) -> dict[str, Any]:
     }
 
 
-# Re-export calculate_regex_complexity for backward compatibility
-__all__ = ['analyse_path', 'calculate_regex_complexity', 'FileAnalyzer', 'FileAnalysisState']
+__all__ = ['analyse_path', 'FileAnalyzer', 'FileAnalysisState']

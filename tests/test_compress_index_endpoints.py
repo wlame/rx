@@ -1,8 +1,6 @@
 """Tests for compress and index HTTP endpoints with background task management."""
 
-import asyncio
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -102,7 +100,6 @@ class TestCompressEndpoint:
         4. Verify result contains expected fields (compressed_size, frame_count, etc.)
         5. Verify compressed file exists on disk
         """
-        import os
 
         import requests
 

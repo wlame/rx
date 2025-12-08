@@ -12,7 +12,6 @@ Security Features:
 - Supports multiple search roots for flexible configuration
 """
 
-import os
 from pathlib import Path
 from typing import Optional
 

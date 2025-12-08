@@ -6,7 +6,6 @@ import tempfile
 import pytest
 from fastapi.testclient import TestClient
 
-from rx.path_security import set_search_root
 from rx.web import app
 
 

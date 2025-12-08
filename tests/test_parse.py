@@ -3,10 +3,8 @@
 import os
 import tempfile
 
-import pytest
 
 from rx.file_utils import (
-    get_context,
     get_file_offsets,
 )
 from rx.regex import calculate_regex_complexity

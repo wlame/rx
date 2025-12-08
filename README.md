@@ -12,8 +12,12 @@ If you need to process many files repeatedly, use the API server (`rx serve`) in
 - **Parallel Processing**: Automatic chunking and parallel execution for large files
 - **Samples output**: Can show arbitrary parts of text files with context when you found interested offsets
 - **REST API Server**: All CLI features available via async HTTP API
-- **File Analysis**: Extract metadata, statistics, and metrics from files
+- **File Analysis**: Extract metadata, statistics, and metrics from files (including compressed files)
 - **Regex Complexity Analysis**: Detect ReDoS vulnerabilities before production use
+- **Compressed File Support**: Analyze and search gzip, zstd, xz, bzip2 files transparently
+- **Seekable Zstd**: Fast random access to seekable zstd compressed files with automatic indexing
+- **Analysis Caching**: Cache file analysis results for instant repeated access
+- **Background Tasks**: Background compression and indexing with progress tracking
 - **Security Sandbox**: Restrict file access to specific directories in server mode
 
 ## Prerequisites
@@ -141,13 +145,22 @@ rx /var/log/app.log "error" --json         # JSON output
 ```
 
 ### `rx analyse`
-Extract file metadata and statistics.
+Extract file metadata and statistics (works with text and compressed files).
 
 ```bash
 rx analyse /var/log/app.log               # Single file
+rx analyse /var/log/app.log.gz            # Compressed file (auto-decompressed)
 rx analyse /var/log/                      # Directory
 rx analyse /var/log/ --max-workers=20     # Parallel processing
+rx analyse /var/log/app.log --json        # JSON output with all metrics
 ```
+
+**Output includes:**
+- File size (bytes and human-readable)
+- Compression info (format, ratio, decompressed size)
+- Index info (if indexed, checkpoint count, validity)
+- Line statistics (count, length metrics, endings)
+- All results cached for instant repeated access
 
 ### `rx check`
 Analyze regex complexity and detect ReDoS vulnerabilities.
@@ -187,19 +200,33 @@ Once the server is running, visit http://localhost:8000/docs for interactive API
 
 **Main Endpoints:**
 - `GET /v1/trace` - Search files for patterns
-- `GET /v1/analyse` - File metadata and statistics
+- `GET /v1/analyse` - File metadata and statistics (including compressed files)
 - `GET /v1/complexity` - Regex complexity analysis
 - `GET /v1/samples` - Extract context lines
 - `GET /health` - Server health and configuration
 
-**Example:**
+**Background Task Endpoints:**
+- `POST /v1/compress` - Start background compression to seekable zstd (returns task_id)
+- `POST /v1/index` - Start background indexing for large files (returns task_id)
+- `GET /v1/tasks/{task_id}` - Check task status (queued, running, completed, failed)
+
+**Examples:**
 
 ```bash
 # Search
 curl "http://localhost:8000/v1/trace?path=/var/log/app.log&regexp=error&max_results=10"
 
-# Analyse
-curl "http://localhost:8000/v1/analyse?path=/var/log/"
+# Analyse (works with compressed files too)
+curl "http://localhost:8000/v1/analyse?path=/var/log/app.log.gz"
+
+# Start background compression (returns immediately with task_id)
+curl -X POST "http://localhost:8000/v1/compress" \
+  -H "Content-Type: application/json" \
+  -d '{"input_path": "/var/log/huge.log", "frame_size": "1MB"}'
+# Response: {"task_id": "550e8400-e29b-41d4-a716-446655440000", "status": "queued"}
+
+# Check compression progress
+curl "http://localhost:8000/v1/tasks/550e8400-e29b-41d4-a716-446655440000"
 
 # With webhooks
 curl "http://localhost:8000/v1/trace?path=/var/log/app.log&regexp=error&hook_on_complete=https://example.com/webhook"
@@ -231,9 +258,9 @@ RX_WORKERS=1 rx serve --host=0.0.0.0 --port=8000
 
 ## Compressed File Support
 
-RX can search and extract samples from compressed files without manual decompression. Supported formats:
+RX can search, analyze, and extract samples from compressed files without manual decompression. Supported formats:
 - **gzip** (`.gz`)
-- **zstd** (`.zst`)
+- **zstd** (`.zst`) - including seekable zstd
 - **xz** (`.xz`)
 - **bzip2** (`.bz2`)
 
@@ -245,6 +272,21 @@ rx /var/log/syslog.1.gz "error.*"
 
 # Search with context
 rx /var/log/syslog.1.gz "error" --samples --context=3
+
+# All regular options work with compressed files
+rx /var/log/app.log.gz "error" -i --json
+```
+
+### Analyzing Compressed Files
+
+```bash
+# Full analysis with automatic decompression
+rx analyse /var/log/app.log.gz
+
+# Output includes compression info:
+# Compressed: gzip, ratio: 5.2x, decompressed: 2.5 GB
+# Lines: 50000000 total, 0 empty
+# Line length: max=256, avg=128.5, median=130.0
 ```
 
 ### Extracting Samples from Compressed Files
@@ -256,13 +298,32 @@ For compressed files, use **line numbers** (byte offsets are not meaningful in c
 rx samples /var/log/syslog.1.gz -l 100,200,300 --context=5
 ```
 
-**Note:** The first access to a compressed file builds an index for efficient random access. This may take time for large files but subsequent accesses are fast.
+### Seekable Zstd Performance
+
+For very large compressed files, convert to **seekable zstd format** for parallel processing:
+
+```bash
+# Background compression to seekable zstd (returns immediately)
+rx compress /var/log/huge.log --frame-size=1MB
+
+# Or via API:
+curl -X POST "http://localhost:8000/v1/compress" \
+  -H "Content-Type: application/json" \
+  -d '{"input_path": "/var/log/huge.log", "frame_size": "1MB"}'
+```
+
+**Seekable zstd benefits:**
+- Fast random access without decompressing entire file
+- Automatic frame-based indexing
+- Better than regular zstd for large files
+- Compressed index cached at `~/.cache/rx/indexes/`
 
 ### Performance Considerations
 
-- Compressed files are processed **sequentially** (no parallel chunking)
-- For very large compressed files, consider converting to seekable zstd format (Tier 2 feature, coming soon)
-- The decompression index is cached at `~/.cache/rx/compressed_indexes/`
+- Regular compressed files (gzip, xz, bzip2) processed sequentially
+- Seekable zstd supports parallel frame access (Tier 2 - coming soon)
+- Decompression index cached at `~/.cache/rx/compressed_indexes/`
+- Analysis results cached at `~/.cache/rx/analyse_cache/` for instant repeated access
 
 ### API Usage
 
@@ -270,14 +331,31 @@ rx samples /var/log/syslog.1.gz -l 100,200,300 --context=5
 # Search compressed file
 curl "http://localhost:8000/v1/trace?path=/var/log/syslog.1.gz&regexp=error"
 
+# Analyze compressed file (includes compression info)
+curl "http://localhost:8000/v1/analyse?path=/var/log/app.log.gz"
+
 # Get samples (use lines parameter, not offsets)
 curl "http://localhost:8000/v1/samples?path=/var/log/syslog.1.gz&lines=100,200&context=3"
+
+# Start background compression task
+curl -X POST "http://localhost:8000/v1/compress" \
+  -H "Content-Type: application/json" \
+  -d '{"input_path": "/var/log/huge.log", "build_index": true}'
 ```
 
 ## Roadmap
 
-- **Seekable zstd**: Parallel processing of seekable zstd files (Tier 2)
-- **Streaming API**: WebSocket endpoint for real-time results
+### Completed Features ✅
+- **Compressed File Support** - Analyze and search gzip, zstd, xz, bzip2 files
+- **File Analysis Caching** - Cache analysis results at `~/.cache/rx/analyse_cache/`
+- **Background Tasks** - Compression and indexing endpoints with progress tracking
+- **Seekable Zstd** - Frame-based indexing for random access without full decompression
+- **Enhanced Analysis** - Compression info, index info, detailed statistics
+
+### In Progress / Coming Soon
+- **Parallel Seekable Zstd** - Parallel frame processing for seekable zstd files (Tier 2)
+- **Streaming API** - WebSocket endpoint for real-time results
+- **Compression Streaming** - Stream compressed output without decompression
 
 ## Development
 
