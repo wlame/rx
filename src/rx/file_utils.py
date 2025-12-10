@@ -819,45 +819,82 @@ def get_context_by_lines(
         # Use average line length from analysis if available, with safety margin
         analysis = index_data.get('analysis', {})
         avg_line_length = analysis.get('line_length_avg', 100)
-        max_line_in_file = analysis.get('line_length_max', 1000)
 
-        # Estimate bytes needed with generous buffer
-        # Use 2x average + max as safety margin (handles variability)
-        estimated_line_size = int(2 * avg_line_length + max_line_in_file)
-        bytes_to_read = lines_to_read * estimated_line_size
+        # Use a reasonable multiplier on average (4x) rather than adding max line length
+        # This handles normal variability without exploding memory for files with outlier long lines
+        # We'll read in chunks and expand if needed
+        estimated_line_size = int(avg_line_length * 4) + 100  # 4x average + 100 byte buffer
+        initial_bytes_to_read = lines_to_read * estimated_line_size
 
-        # Read the chunk
+        # Cap initial read to 10MB to avoid memory issues, we can read more if needed
+        MAX_INITIAL_READ = 10 * 1024 * 1024
+        bytes_to_read = min(initial_bytes_to_read, MAX_INITIAL_READ)
+
+        # Read the chunk, expanding if we don't get enough lines
+        lines = []
+        total_bytes_read = 0
+        MAX_TOTAL_READ = 100 * 1024 * 1024  # Cap at 100MB total to prevent OOM
+        remainder = b''  # Track incomplete line from previous read (as bytes)
+
         try:
             with open(filename, 'rb') as f:
                 f.seek(indexed_offset)
-                chunk = f.read(bytes_to_read)
+
+                while True:
+                    chunk = f.read(bytes_to_read)
+                    if not chunk:
+                        # EOF - add remainder as last line if not empty
+                        if remainder:
+                            lines.append(remainder.decode('utf-8', errors='replace'))
+                        break
+
+                    total_bytes_read += len(chunk)
+
+                    # Prepend any remainder from previous iteration
+                    data = remainder + chunk
+                    remainder = b''
+
+                    # Find all complete lines (ending with \n)
+                    last_newline = data.rfind(b'\n')
+                    if last_newline >= 0:
+                        # Split complete lines from remainder
+                        complete_data = data[: last_newline + 1]
+                        remainder = data[last_newline + 1 :]
+
+                        # Decode and split into lines
+                        decoded = complete_data.decode('utf-8', errors='replace')
+                        for line in decoded.split('\n')[:-1]:  # Last element is empty after trailing \n
+                            lines.append(line + '\n')
+                    else:
+                        # No complete lines yet, keep accumulating
+                        remainder = data
+
+                    # Check if we have enough lines
+                    lines_needed = target_line - indexed_line + after_context + 1
+                    if len(lines) >= lines_needed:
+                        break
+
+                    # Check if we've read too much
+                    if total_bytes_read >= MAX_TOTAL_READ:
+                        logger.warning(f'Reached max read limit ({MAX_TOTAL_READ} bytes) for line {target_line}')
+                        # Add remainder as incomplete line
+                        if remainder:
+                            lines.append(remainder.decode('utf-8', errors='replace'))
+                        break
+
+                    # Read more - double the chunk size for efficiency
+                    bytes_to_read = min(bytes_to_read * 2, MAX_TOTAL_READ - total_bytes_read)
+                    if bytes_to_read <= 0:
+                        break
+
         except OSError as e:
             logger.error(f'Failed to read file {filename}: {e}')
             result[target_line] = []
             continue
 
-        # Split into lines on \n only (to match wc -l and analyse behavior)
-        # Do NOT use splitlines() as it treats \r, \n, and \r\n all as separators
-        # which creates extra lines with CRLF files that have bare \r characters
-        decoded_chunk = chunk.decode('utf-8', errors='replace')
-
-        # Split on \n, keeping the line separator
-        if '\n' in decoded_chunk:
-            # Split by \n but keep it in the lines
-            parts = decoded_chunk.split('\n')
-            lines = [parts[i] + '\n' for i in range(len(parts) - 1)]
-            # Add last part only if it's not empty (no trailing \n)
-            if parts[-1]:
-                lines.append(parts[-1])
-        else:
-            # No newlines in chunk
-            lines = [decoded_chunk] if decoded_chunk else []
-
-        # We need to actually count lines from indexed position
-        lines_from_indexed = len(lines)
-
         # Calculate the target line's position within our read chunk
         # target_line is absolute, indexed_line is where we started reading
+        lines_from_indexed = len(lines)
         target_offset_in_chunk = target_line - indexed_line
 
         # Check if we read enough lines to include our target + context
@@ -869,7 +906,7 @@ def get_context_by_lines(
             context_lines = [line.rstrip(NEWLINE_SYMBOL + '\r') for line in lines[start_idx:end_idx]]
             result[target_line] = context_lines
         else:
-            # Didn't read enough lines - this shouldn't happen with our buffer
+            # Didn't read enough lines
             logger.warning(
                 f"Didn't read enough lines for line {target_line} (read {lines_from_indexed}, needed {target_offset_in_chunk + after_context + 1})"
             )

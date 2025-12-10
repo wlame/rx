@@ -555,7 +555,7 @@ class FileAnalyzer:
             sample_size = get_sample_size_lines()
             line_length_sample = []
 
-            # Use binary mode and split on \n to match wc -l behavior
+            # Use binary mode to handle all line ending types correctly
             with open(filepath, 'rb') as f:
                 for line_num, line_bytes in enumerate(f, 1):
                     last_line_num = line_num

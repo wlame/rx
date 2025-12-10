@@ -604,6 +604,98 @@ def calculate_exact_line_for_offset(filename: str, target_offset: int, index_dat
         return -1
 
 
+def calculate_lines_for_offsets_batch(
+    filename: str, target_offsets: list[int], index_data: dict | None = None
+) -> dict[int, int]:
+    """Calculate line numbers for multiple byte offsets in a single file pass.
+
+    This is much more efficient than calling calculate_exact_line_for_offset
+    multiple times, as it reads the file only once.
+
+    Args:
+        filename: Path to the file
+        target_offsets: List of byte offsets to find line numbers for
+        index_data: Optional index data. If None, will try to load
+
+    Returns:
+        Dictionary mapping offset -> line_number (or -1 if cannot determine)
+    """
+    if not target_offsets:
+        return {}
+
+    # If no index provided, try to load it
+    if index_data is None:
+        index_path = get_index_path(filename)
+        index_data = load_index(index_path)
+
+    # Sort offsets to process them in order (single pass through file)
+    sorted_offsets = sorted(set(target_offsets))
+    results: dict[int, int] = {offset: -1 for offset in target_offsets}
+
+    if not index_data:
+        # No index - check if file is small enough to read
+        try:
+            file_size = os.path.getsize(filename)
+            threshold = get_large_file_threshold_bytes()
+            if file_size > threshold:
+                return results  # Large file without index - cannot determine
+        except OSError:
+            return results
+
+    # Find the best starting point from index
+    line_index = index_data.get('line_index', [[1, 0]]) if index_data else [[1, 0]]
+
+    # Find the indexed position before the first offset we need
+    first_offset = sorted_offsets[0]
+    offsets_in_index = [entry[1] for entry in line_index]
+    idx = bisect.bisect_right(offsets_in_index, first_offset) - 1
+    if idx < 0:
+        idx = 0
+
+    start_line, start_offset = line_index[idx]
+
+    # Read file once and calculate all line numbers
+    try:
+        with open(filename, 'rb') as f:
+            f.seek(start_offset)
+            current_line = start_line
+            current_offset = start_offset
+            offset_idx = 0  # Index into sorted_offsets
+
+            # Skip offsets that are before our start position
+            while offset_idx < len(sorted_offsets) and sorted_offsets[offset_idx] < start_offset:
+                offset_idx += 1
+
+            for line_bytes in f:
+                line_end_offset = current_offset + len(line_bytes)
+
+                # Check all offsets that fall within this line
+                while offset_idx < len(sorted_offsets):
+                    target = sorted_offsets[offset_idx]
+                    if target < current_offset:
+                        # This shouldn't happen if we started correctly
+                        offset_idx += 1
+                    elif current_offset <= target < line_end_offset:
+                        # This offset is within the current line
+                        results[target] = current_line
+                        offset_idx += 1
+                    else:
+                        # Target is beyond this line, move to next line
+                        break
+
+                # If we've found all offsets, stop reading
+                if offset_idx >= len(sorted_offsets):
+                    break
+
+                current_offset = line_end_offset
+                current_line += 1
+
+    except OSError as e:
+        logger.error(f'Failed to read file {filename}: {e}')
+
+    return results
+
+
 def get_index_info(source_path: str) -> dict | None:
     """Get information about an existing index.
 

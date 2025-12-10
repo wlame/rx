@@ -1716,6 +1716,85 @@ def parse_multiple_files_multipattern(
     if max_results and len(matches) > max_results:
         matches = matches[:max_results]
 
+    # Calculate absolute line numbers for matches that don't have them
+    # This is needed for regular files processed in chunks where ripgrep only knows
+    # the line number within the chunk, not the absolute line in the file
+    from rx.index import calculate_lines_for_offsets_batch, get_index_path, is_index_valid, load_index
+
+    # Group matches and context lines by file_id for batch processing
+    matches_by_file: dict[str, list[dict]] = {}
+    context_by_file: dict[str, list[tuple[int, ContextLine]]] = {}  # file_id -> [(index, ctx_line), ...]
+
+    for match in matches:
+        file_id = match['file']
+        if file_id not in matches_by_file:
+            matches_by_file[file_id] = []
+        matches_by_file[file_id].append(match)
+
+    for idx, (file_id, ctx_line) in enumerate(all_context_lines):
+        if file_id not in context_by_file:
+            context_by_file[file_id] = []
+        context_by_file[file_id].append((idx, ctx_line))
+
+    # For each file, calculate absolute line numbers for all matches and context lines in one pass
+    for file_id in set(matches_by_file.keys()) | set(context_by_file.keys()):
+        file_matches = matches_by_file.get(file_id, [])
+        file_context = context_by_file.get(file_id, [])
+
+        # Collect all offsets that need line numbers
+        offsets_to_resolve: list[int] = []
+
+        for match in file_matches:
+            if match.get('absolute_line_number', -1) == -1 and not match.get('is_compressed'):
+                offsets_to_resolve.append(match['offset'])
+
+        for _, ctx_line in file_context:
+            if ctx_line.absolute_line_number == -1:
+                offsets_to_resolve.append(ctx_line.absolute_offset)
+
+        if not offsets_to_resolve:
+            continue
+
+        # Get the filepath from file_ids mapping
+        filepath = file_ids.get(file_id)
+        if not filepath:
+            continue
+
+        # Skip compressed files (they have different offset semantics)
+        if is_compressed(filepath):
+            continue
+
+        # Try to load index
+        index_data = None
+        if is_index_valid(filepath):
+            index_data = load_index(get_index_path(filepath))
+
+        # Calculate all line numbers in a single file pass
+        offset_to_line = calculate_lines_for_offsets_batch(filepath, offsets_to_resolve, index_data)
+
+        # Update matches
+        for match in file_matches:
+            if match.get('absolute_line_number', -1) == -1 and not match.get('is_compressed'):
+                abs_line = offset_to_line.get(match['offset'], -1)
+                if abs_line != -1:
+                    match['absolute_line_number'] = abs_line
+                    match['relative_line_number'] = abs_line
+
+        # Update context lines
+        for idx, ctx_line in file_context:
+            if ctx_line.absolute_line_number == -1:
+                abs_line = offset_to_line.get(ctx_line.absolute_offset, -1)
+                if abs_line != -1:
+                    all_context_lines[idx] = (
+                        file_id,
+                        ContextLine(
+                            relative_line_number=abs_line,
+                            absolute_line_number=abs_line,
+                            line_text=ctx_line.line_text,
+                            absolute_offset=ctx_line.absolute_offset,
+                        ),
+                    )
+
     # Group context lines by match
     # Build composite key: "pattern:file:offset" -> [ContextLine, ...]
     context_dict = {}
