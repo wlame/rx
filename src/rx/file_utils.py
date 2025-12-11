@@ -58,31 +58,29 @@ def scan_directory_for_text_files(dirpath: str, max_files: int = MAX_FILES) -> t
     text_files = []
     skipped_files = []
 
-    logger.info(f'[SCAN] Scanning directory: {dirpath}')
+    logger.info(f'[SCAN] Scanning directory recursively: {dirpath}')
 
     try:
-        entries = os.listdir(dirpath)
-        logger.debug(f'[SCAN] Found {len(entries)} entries in directory')
+        for root, dirs, files in os.walk(dirpath):
+            for filename in files:
+                if len(text_files) + len(skipped_files) >= max_files:
+                    logger.warning(f'[SCAN] Reached max_files limit ({max_files}), stopping scan')
+                    return text_files, skipped_files
 
-        for entry in entries:
-            if len(text_files) + len(skipped_files) >= max_files:
-                logger.warning(f'[SCAN] Reached max_files limit ({max_files}), stopping scan')
-                break
+                filepath = os.path.join(root, filename)
 
-            filepath = os.path.join(dirpath, entry)
+                # Skip symlinks
+                if os.path.islink(filepath):
+                    logger.debug(f'[SCAN] Skipping symlink: {filepath}')
+                    continue
 
-            # Skip directories, symlinks, etc - only process regular files
-            if not os.path.isfile(filepath):
-                logger.debug(f'[SCAN] Skipping non-file: {entry}')
-                continue
-
-            # Check if text file
-            if is_text_file(filepath):
-                text_files.append(filepath)
-                logger.debug(f'[SCAN] Added text file: {entry}')
-            else:
-                skipped_files.append(filepath)
-                logger.debug(f'[SCAN] Skipped binary file: {entry}')
+                # Check if text file
+                if is_text_file(filepath):
+                    text_files.append(filepath)
+                    logger.debug(f'[SCAN] Added text file: {filepath}')
+                else:
+                    skipped_files.append(filepath)
+                    logger.debug(f'[SCAN] Skipped binary file: {filepath}')
 
         logger.info(f'[SCAN] Completed: {len(text_files)} text files, {len(skipped_files)} skipped')
         return text_files, skipped_files
