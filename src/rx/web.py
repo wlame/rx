@@ -230,7 +230,7 @@ def get_python_packages() -> dict:
 def get_constants() -> dict:
     # Collect application constants
     from rx import file_utils, trace
-    from rx.utils import NEWLINE_SYMBOL
+    from rx.utils import NEWLINE_SYMBOL, get_rx_cache_base
 
     return {
         'LOG_LEVEL': log_level_name,
@@ -240,6 +240,7 @@ def get_constants() -> dict:
         'MIN_CHUNK_SIZE_MB': file_utils.MIN_CHUNK_SIZE // (1024 * 1024),
         'MAX_FILES': file_utils.MAX_FILES,
         'NEWLINE_SYMBOL': repr(NEWLINE_SYMBOL),  # Show as repr to see escape sequences
+        'CACHE_DIR': str(get_rx_cache_base()),  # Effective cache directory
     }
 
 

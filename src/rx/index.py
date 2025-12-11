@@ -3,7 +3,7 @@
 This module provides functionality to create and manage line-offset indexes
 for large text files, enabling efficient random access by line number.
 
-Index files are stored in ~/.cache/rx/indexes/ and contain:
+Index files are stored in $RX_CACHE_DIR/indexes/ (or ~/.cache/rx/indexes/) and contain:
 - Source file metadata (path, size, modification time)
 - Analysis results (line counts, statistics)
 - Line-to-offset mapping at regular intervals
@@ -23,7 +23,7 @@ from pathlib import Path
 # Import noop prometheus stub by default (CLI mode)
 # Real prometheus is only imported in web.py for server mode
 from rx.cli import prometheus as prom
-from rx.utils import get_int_env
+from rx.utils import get_int_env, get_rx_cache_dir
 
 
 logger = logging.getLogger(__name__)
@@ -31,21 +31,11 @@ logger = logging.getLogger(__name__)
 # Constants
 INDEX_VERSION = 1
 DEFAULT_LARGE_FILE_MB = 100  # Default threshold if RX_LARGE_FILE_MB not set
-CACHE_DIR_NAME = 'rx/indexes'
 
 
 def get_cache_dir() -> Path:
     """Get the cache directory path, creating it if necessary."""
-    # Use XDG_CACHE_HOME if set, otherwise ~/.cache
-    xdg_cache = os.environ.get('XDG_CACHE_HOME')
-    if xdg_cache:
-        base = Path(xdg_cache)
-    else:
-        base = Path.home() / '.cache'
-
-    cache_dir = base / CACHE_DIR_NAME
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    return cache_dir
+    return get_rx_cache_dir('indexes')
 
 
 def get_large_file_threshold_bytes() -> int:

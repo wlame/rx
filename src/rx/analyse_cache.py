@@ -2,6 +2,8 @@
 
 Caches analysis results to avoid re-analyzing unchanged files.
 Similar to trace_cache.py but for analyse operations.
+
+Cache files are stored in $RX_CACHE_DIR/analyse_cache/ (or ~/.cache/rx/analyse_cache/).
 """
 
 import hashlib
@@ -12,6 +14,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from pydantic import BaseModel, Field
+
+from rx.utils import get_rx_cache_dir
 
 
 logger = logging.getLogger(__name__)
@@ -34,12 +38,9 @@ def get_analyse_cache_dir() -> Path:
     """Get the analyse cache directory path.
 
     Returns:
-        Path to ~/.cache/rx/analyse_cache/
+        Path to $RX_CACHE_DIR/analyse_cache/ (or ~/.cache/rx/analyse_cache/)
     """
-    cache_home = os.environ.get('XDG_CACHE_HOME', os.path.expanduser('~/.cache'))
-    cache_dir = Path(cache_home) / 'rx' / 'analyse_cache'
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    return cache_dir
+    return get_rx_cache_dir('analyse_cache')
 
 
 def get_cache_key(file_path: str) -> str:

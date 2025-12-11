@@ -1,7 +1,7 @@
 """Seekable zstd index module.
 
 This module manages companion index files for seekable zstd files.
-Index files are stored in ~/.cache/rx/indexes/ and contain:
+Index files are stored in $RX_CACHE_DIR/indexes/ (or ~/.cache/rx/indexes/) and contain:
 1. Seek table cache (avoid re-reading from file each time)
 2. Line-to-frame mapping for fast line access
 3. Frame-to-line-range mapping
@@ -13,7 +13,6 @@ enabling fast samples extraction without full decompression.
 import hashlib
 import json
 import logging
-import os
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -27,15 +26,13 @@ from rx.seekable_zstd import (
     is_seekable_zstd,
     read_seek_table,
 )
+from rx.utils import get_rx_cache_dir
 
 
 logger = logging.getLogger(__name__)
 
 # Index version for compatibility checking
 SEEKABLE_INDEX_VERSION = 1
-
-# Index directory name under XDG cache
-INDEX_DIR_NAME = 'rx/indexes'
 
 # Sampling interval for line index (every N lines)
 LINE_INDEX_INTERVAL = 10000
@@ -123,21 +120,13 @@ class SeekableIndex:
 
 def get_index_dir() -> Path:
     """Get the index directory path, creating it if necessary."""
-    xdg_cache = os.environ.get('XDG_CACHE_HOME')
-    if xdg_cache:
-        base = Path(xdg_cache)
-    else:
-        base = Path.home() / '.cache'
-
-    index_dir = base / INDEX_DIR_NAME
-    index_dir.mkdir(parents=True, exist_ok=True)
-    return index_dir
+    return get_rx_cache_dir('indexes')
 
 
 def get_index_path(zst_path: str | Path) -> Path:
     """Get the index file path for a seekable zstd file.
 
-    Index files are stored in ~/.cache/rx/indexes/ with names based on
+    Index files are stored in $RX_CACHE_DIR/indexes/ with names based on
     hash of the absolute path plus the filename for readability.
 
     Args:

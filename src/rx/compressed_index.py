@@ -4,7 +4,7 @@ This module manages decompression indexes that enable efficient random access
 to compressed files. Without an index, getting content from a specific line
 in a compressed file requires decompressing from the beginning.
 
-Index Storage: ~/.cache/rx/compressed_indexes/
+Index Storage: $RX_CACHE_DIR/compressed_indexes/ (or ~/.cache/rx/compressed_indexes/)
 
 Index Structure:
 - Metadata about the source compressed file (path, mtime, size)
@@ -16,22 +16,20 @@ Index Structure:
 import hashlib
 import json
 import logging
-import os
 import time
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 from rx.compression import (
     CompressionFormat,
     decompress_to_stdout,
     detect_compression,
 )
+from rx.utils import get_rx_cache_dir
+
 
 logger = logging.getLogger(__name__)
-
-# Default cache directory for compressed file indexes
-DEFAULT_CACHE_DIR = Path.home() / ".cache" / "rx" / "compressed_indexes"
 
 # Line sampling interval for building line index
 # We store line number -> decompressed byte offset for every Nth line
@@ -47,9 +45,7 @@ def get_compressed_index_dir() -> Path:
     Returns:
         Path to the compressed index directory
     """
-    cache_dir = Path(os.environ.get("RX_COMPRESSED_INDEX_DIR", str(DEFAULT_CACHE_DIR)))
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    return cache_dir
+    return get_rx_cache_dir('compressed_indexes')
 
 
 def get_compressed_index_path(source_path: str | Path) -> Path:
@@ -68,10 +64,10 @@ def get_compressed_index_path(source_path: str | Path) -> Path:
     filename = source_path.name
 
     index_dir = get_compressed_index_dir()
-    return index_dir / f"{path_hash}_{filename}.json"
+    return index_dir / f'{path_hash}_{filename}.json'
 
 
-def load_compressed_index(source_path: str | Path) -> Optional[dict]:
+def load_compressed_index(source_path: str | Path) -> dict | None:
     """Load an existing compressed file index.
 
     Args:
@@ -86,10 +82,10 @@ def load_compressed_index(source_path: str | Path) -> Optional[dict]:
         return None
 
     try:
-        with open(index_path, "r") as f:
+        with open(index_path) as f:
             return json.load(f)
-    except (json.JSONDecodeError, IOError) as e:
-        logger.warning(f"Failed to load compressed index {index_path}: {e}")
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning(f'Failed to load compressed index {index_path}: {e}')
         return None
 
 
@@ -114,8 +110,8 @@ def is_compressed_index_valid(source_path: str | Path) -> bool:
         return False
 
     # Check version
-    if index_data.get("version") != INDEX_VERSION:
-        logger.debug(f"Index version mismatch for {source_path}")
+    if index_data.get('version') != INDEX_VERSION:
+        logger.debug(f'Index version mismatch for {source_path}')
         return False
 
     # Check source file still exists and matches
@@ -124,12 +120,12 @@ def is_compressed_index_valid(source_path: str | Path) -> bool:
         source_mtime = datetime.fromtimestamp(stat.st_mtime).isoformat()
         source_size = stat.st_size
 
-        if index_data.get("source_size_bytes") != source_size:
-            logger.debug(f"Source file size changed for {source_path}")
+        if index_data.get('source_size_bytes') != source_size:
+            logger.debug(f'Source file size changed for {source_path}')
             return False
 
-        if index_data.get("source_modified_at") != source_mtime:
-            logger.debug(f"Source file mtime changed for {source_path}")
+        if index_data.get('source_modified_at') != source_mtime:
+            logger.debug(f'Source file mtime changed for {source_path}')
             return False
 
     except OSError:
@@ -140,7 +136,7 @@ def is_compressed_index_valid(source_path: str | Path) -> bool:
 
 def build_compressed_index(
     source_path: str | Path,
-    progress_callback: Optional[callable] = None,
+    progress_callback: Callable | None = None,
 ) -> dict:
     """Build a decompression + line index for a compressed file.
 
@@ -163,9 +159,9 @@ def build_compressed_index(
 
     compression_format = detect_compression(source_path)
     if compression_format == CompressionFormat.NONE:
-        raise ValueError(f"File is not compressed: {source_path}")
+        raise ValueError(f'File is not compressed: {source_path}')
 
-    logger.info(f"Building compressed index for {source_path}")
+    logger.info(f'Building compressed index for {source_path}')
     start_time = time.time()
 
     # Get source file metadata
@@ -193,7 +189,7 @@ def build_compressed_index(
             # Count newlines in chunk and track positions
             chunk_offset = 0
             while True:
-                newline_pos = chunk.find(b"\n", chunk_offset)
+                newline_pos = chunk.find(b'\n', chunk_offset)
                 if newline_pos == -1:
                     break
 
@@ -214,35 +210,35 @@ def build_compressed_index(
         proc.wait()
 
         if proc.returncode != 0:
-            stderr = proc.stderr.read().decode() if proc.stderr else ""
-            raise RuntimeError(f"Decompression failed: {stderr}")
+            stderr = proc.stderr.read().decode() if proc.stderr else ''
+            raise RuntimeError(f'Decompression failed: {stderr}')
 
     except Exception as e:
         proc.kill()
-        raise RuntimeError(f"Failed to build index: {e}")
+        raise RuntimeError(f'Failed to build index: {e}')
 
     elapsed = time.time() - start_time
     total_lines = current_line
     decompressed_size = current_offset
 
     logger.info(
-        f"Built index for {source_path}: {total_lines} lines, "
-        f"{decompressed_size} bytes decompressed, {len(line_index)} checkpoints, "
-        f"{elapsed:.2f}s"
+        f'Built index for {source_path}: {total_lines} lines, '
+        f'{decompressed_size} bytes decompressed, {len(line_index)} checkpoints, '
+        f'{elapsed:.2f}s'
     )
 
     index_data = {
-        "version": INDEX_VERSION,
-        "source_path": str(source_path),
-        "source_modified_at": source_mtime,
-        "source_size_bytes": source_size,
-        "compression_format": compression_format.value,
-        "decompressed_size_bytes": decompressed_size,
-        "total_lines": total_lines,
-        "line_sample_interval": LINE_SAMPLE_INTERVAL,
-        "line_index": line_index,
-        "created_at": datetime.now().isoformat(),
-        "build_time_seconds": elapsed,
+        'version': INDEX_VERSION,
+        'source_path': str(source_path),
+        'source_modified_at': source_mtime,
+        'source_size_bytes': source_size,
+        'compression_format': compression_format.value,
+        'decompressed_size_bytes': decompressed_size,
+        'total_lines': total_lines,
+        'line_sample_interval': LINE_SAMPLE_INTERVAL,
+        'line_index': line_index,
+        'created_at': datetime.now().isoformat(),
+        'build_time_seconds': elapsed,
     }
 
     return index_data
@@ -263,16 +259,16 @@ def save_compressed_index(index_data: dict, source_path: str | Path) -> Path:
     # Ensure directory exists
     index_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with open(index_path, "w") as f:
+    with open(index_path, 'w') as f:
         json.dump(index_data, f, indent=2)
 
-    logger.debug(f"Saved compressed index to {index_path}")
+    logger.debug(f'Saved compressed index to {index_path}')
     return index_path
 
 
 def get_or_build_compressed_index(
     source_path: str | Path,
-    progress_callback: Optional[callable] = None,
+    progress_callback: Callable | None = None,
 ) -> dict:
     """Get an existing valid index or build a new one.
 
@@ -284,7 +280,7 @@ def get_or_build_compressed_index(
         Index data dictionary
     """
     if is_compressed_index_valid(source_path):
-        logger.debug(f"Using cached compressed index for {source_path}")
+        logger.debug(f'Using cached compressed index for {source_path}')
         return load_compressed_index(source_path)
 
     # Build new index
@@ -303,7 +299,7 @@ def find_nearest_checkpoint(index_data: dict, target_line: int) -> tuple[int, in
     Returns:
         Tuple of (checkpoint_line, checkpoint_offset)
     """
-    line_index = index_data.get("line_index", [[1, 0]])
+    line_index = index_data.get('line_index', [[1, 0]])
 
     # Binary search for nearest checkpoint <= target_line
     left, right = 0, len(line_index) - 1
@@ -326,7 +322,7 @@ def get_decompressed_lines(
     source_path: str | Path,
     start_line: int,
     count: int = 1,
-    index_data: Optional[dict] = None,
+    index_data: dict | None = None,
 ) -> list[str]:
     """Get specific lines from a compressed file.
 
@@ -352,13 +348,13 @@ def get_decompressed_lines(
     checkpoint_line, checkpoint_offset = find_nearest_checkpoint(index_data, start_line)
 
     logger.debug(
-        f"Getting lines {start_line}-{start_line + count - 1} from {source_path}, "
-        f"starting from checkpoint line {checkpoint_line} at offset {checkpoint_offset}"
+        f'Getting lines {start_line}-{start_line + count - 1} from {source_path}, '
+        f'starting from checkpoint line {checkpoint_line} at offset {checkpoint_offset}'
     )
 
     # Decompress from beginning (we can't seek in compressed stream without special tools)
     # For Tier 1, we decompress from start and skip to checkpoint
-    compression_format = CompressionFormat.from_string(index_data.get("compression_format", "gzip"))
+    compression_format = CompressionFormat.from_string(index_data.get('compression_format', 'gzip'))
     proc = decompress_to_stdout(source_path, compression_format)
 
     try:
@@ -377,24 +373,24 @@ def get_decompressed_lines(
         result_lines = []
 
         # Read line by line
-        buffer = b""
+        buffer = b''
         while len(result_lines) < count:
             chunk = proc.stdout.read(4096)
             if not chunk:
                 # Handle last line without newline
                 if buffer and lines_to_skip <= 0:
-                    result_lines.append(buffer.decode("utf-8", errors="replace"))
+                    result_lines.append(buffer.decode('utf-8', errors='replace'))
                 break
 
             buffer += chunk
 
-            while b"\n" in buffer:
-                line, buffer = buffer.split(b"\n", 1)
+            while b'\n' in buffer:
+                line, buffer = buffer.split(b'\n', 1)
 
                 if lines_to_skip > 0:
                     lines_to_skip -= 1
                 else:
-                    result_lines.append(line.decode("utf-8", errors="replace"))
+                    result_lines.append(line.decode('utf-8', errors='replace'))
                     if len(result_lines) >= count:
                         break
 
@@ -407,7 +403,7 @@ def get_decompressed_lines(
 
     except Exception as e:
         proc.kill()
-        raise RuntimeError(f"Failed to read lines from compressed file: {e}")
+        raise RuntimeError(f'Failed to read lines from compressed file: {e}')
 
 
 def get_decompressed_content_at_line(
@@ -415,7 +411,7 @@ def get_decompressed_content_at_line(
     line_number: int,
     context_before: int = 0,
     context_after: int = 0,
-    index_data: Optional[dict] = None,
+    index_data: dict | None = None,
 ) -> list[str]:
     """Get content around a specific line in a compressed file.
 
@@ -452,7 +448,7 @@ def delete_compressed_index(source_path: str | Path) -> bool:
 
     if index_path.exists():
         index_path.unlink()
-        logger.debug(f"Deleted compressed index {index_path}")
+        logger.debug(f'Deleted compressed index {index_path}')
         return True
 
     return False
@@ -467,21 +463,21 @@ def list_compressed_indexes() -> list[dict]:
     index_dir = get_compressed_index_dir()
     indexes = []
 
-    for index_file in index_dir.glob("*.json"):
+    for index_file in index_dir.glob('*.json'):
         try:
-            with open(index_file, "r") as f:
+            with open(index_file) as f:
                 data = json.load(f)
                 indexes.append(
                     {
-                        "index_path": str(index_file),
-                        "source_path": data.get("source_path"),
-                        "compression_format": data.get("compression_format"),
-                        "decompressed_size_bytes": data.get("decompressed_size_bytes"),
-                        "total_lines": data.get("total_lines"),
-                        "created_at": data.get("created_at"),
+                        'index_path': str(index_file),
+                        'source_path': data.get('source_path'),
+                        'compression_format': data.get('compression_format'),
+                        'decompressed_size_bytes': data.get('decompressed_size_bytes'),
+                        'total_lines': data.get('total_lines'),
+                        'created_at': data.get('created_at'),
                     }
                 )
-        except (json.JSONDecodeError, IOError):
+        except (OSError, json.JSONDecodeError):
             continue
 
     return indexes
@@ -496,12 +492,12 @@ def clear_compressed_indexes() -> int:
     index_dir = get_compressed_index_dir()
     count = 0
 
-    for index_file in index_dir.glob("*.json"):
+    for index_file in index_dir.glob('*.json'):
         try:
             index_file.unlink()
             count += 1
         except OSError:
             pass
 
-    logger.info(f"Cleared {count} compressed indexes")
+    logger.info(f'Cleared {count} compressed indexes')
     return count

@@ -3,7 +3,7 @@
 This module provides functionality to cache and retrieve trace results for
 large files, enabling fast lookups without re-running the dd|rg pipeline.
 
-Cache files are stored in ~/.cache/rx/trace_cache/ and contain:
+Cache files are stored in $RX_CACHE_DIR/trace_cache/ (or ~/.cache/rx/trace_cache/) and contain:
 - Source file metadata (path, size, modification time)
 - Patterns and flags used for the search
 - Match results (pattern index, byte offset, line number)
@@ -31,13 +31,13 @@ from rx.cli import prometheus as prom
 from rx.file_utils import get_context_by_lines
 from rx.index import get_large_file_threshold_bytes
 from rx.models import ContextLine, Submatch
+from rx.utils import get_rx_cache_dir
 
 
 logger = logging.getLogger(__name__)
 
 # Constants
 TRACE_CACHE_VERSION = 2  # Bumped for compressed file support
-TRACE_CACHE_DIR_NAME = 'rx/trace_cache'
 
 # Flags that affect matching and must be part of cache key
 MATCHING_FLAGS = {'-i', '-w', '-x', '-F', '-P', '--case-sensitive', '--ignore-case'}
@@ -45,15 +45,7 @@ MATCHING_FLAGS = {'-i', '-w', '-x', '-F', '-P', '--case-sensitive', '--ignore-ca
 
 def get_trace_cache_dir() -> Path:
     """Get the trace cache directory path, creating it if necessary."""
-    xdg_cache = os.environ.get('XDG_CACHE_HOME')
-    if xdg_cache:
-        base = Path(xdg_cache)
-    else:
-        base = Path.home() / '.cache'
-
-    cache_dir = base / TRACE_CACHE_DIR_NAME
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    return cache_dir
+    return get_rx_cache_dir('trace_cache')
 
 
 def compute_patterns_hash(patterns: list[str], rg_flags: list[str]) -> str:
