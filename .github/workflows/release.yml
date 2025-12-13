@@ -112,6 +112,20 @@ jobs:
         with:
           enable-cache: true
 
+      - name: Build frontend in container
+        if: steps.should_build.outputs.should_run == 'true' && matrix.container == 'ubuntu:20.04'
+        run: |
+          apt-get install -y docker.io
+          systemctl start docker || true
+          make frontend-build
+        env:
+          DEBIAN_FRONTEND: noninteractive
+
+      - name: Build frontend
+        if: steps.should_build.outputs.should_run == 'true' && matrix.container == null
+        run: |
+          make frontend-build
+
       - name: Install dependencies in container
         if: steps.should_build.outputs.should_run == 'true' && matrix.container == 'ubuntu:20.04'
         run: |
