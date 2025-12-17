@@ -37,7 +37,7 @@ class TestAbsoluteLineNumbers:
         """Test that absolute_line_number appears in JSON output."""
         result = self.runner.invoke(
             trace_command,
-            [self.test_file, 'pattern', '--json'],
+            ['pattern', self.test_file, '--json'],
         )
         assert result.exit_code == 0
 
@@ -58,7 +58,7 @@ class TestAbsoluteLineNumbers:
         """Test that absolute_line_number appears in context lines."""
         result = self.runner.invoke(
             trace_command,
-            [self.test_file, 'pattern', '--json', '-C', '1'],
+            ['pattern', self.test_file, '--json', '-C', '1'],
         )
         assert result.exit_code == 0
 
@@ -106,7 +106,7 @@ class TestAbsoluteLineNumbers:
         # Run trace on seekable zstd file
         result = self.runner.invoke(
             trace_command,
-            [zst_file, 'pattern', '--json'],
+            ['pattern', zst_file, '--json'],
         )
 
         if result.exit_code == 0:
@@ -165,7 +165,7 @@ class TestAbsoluteLineNumbers:
         # First run - creates cache
         result1 = self.runner.invoke(
             trace_command,
-            [large_file, 'pattern', '--json'],
+            ['pattern', large_file, '--json'],
         )
         assert result1.exit_code == 0
 
@@ -178,7 +178,7 @@ class TestAbsoluteLineNumbers:
         # Second run - uses cache
         result2 = self.runner.invoke(
             trace_command,
-            [large_file, 'pattern', '--json'],
+            ['pattern', large_file, '--json'],
         )
         assert result2.exit_code == 0
 

@@ -230,8 +230,8 @@ def handle_samples_output(
         allow_extra_args=True,
     )
 )
-@click.argument('path_arg', type=click.Path(exists=True), required=False, metavar='PATH')
-@click.argument('regex_arg', type=str, required=False, metavar='REGEX')
+@click.argument('pattern_arg', type=str, required=False, metavar='PATTERN')
+@click.argument('path_args', type=str, required=False, nargs=-1, metavar='[PATH ...]')
 @click.option(
     '--path',
     '--file',
@@ -265,8 +265,8 @@ def handle_samples_output(
 @click.pass_context
 def trace_command(
     ctx,
-    path_arg,
-    regex_arg,
+    pattern_arg,
+    path_args,
     path,
     regexp,
     max_results,
@@ -288,19 +288,34 @@ def trace_command(
     Trace files and directories for regex patterns using ripgrep.
 
     \b
+    Usage: rx [OPTIONS] PATTERN [PATH ...]
+
+    If PATH is not specified, searches in the current directory.
+    For multiple patterns, use -e/--regexp/--regex multiple times.
+    For multiple paths, use --path/--file multiple times or list them after PATTERN.
+
+    \b
     Basic Examples:
-        rx /path/to/file.txt "error.*"              # Search for pattern
-        rx file.log "error" --max-results=10        # Limit results
-        rx file.log "error" --samples               # Show context lines
-        rx file.log "error" --samples --context=5   # Custom context size
+        rx "error.*"                                # Search in current directory
+        rx "error.*" file.log                       # Search in specific file
+        rx "error.*" file.log dir/                  # Search in multiple paths
+        rx "error" --max-results=10                 # Limit results
+        rx "error" --samples                        # Show context lines
+        rx "error" --samples --context=5            # Custom context size
+
+    \b
+    Multiple Patterns/Paths:
+        rx -e "error" -e "warning" file.log         # Multiple patterns
+        rx "error" --path=file1.log --path=file2.log # Multiple paths via options
+        rx "error" file1.log file2.log              # Multiple paths as arguments
 
     \b
     Ripgrep Passthrough:
         Any unrecognized options are passed directly to ripgrep:
-        rx file.log "error" -i                      # Case-insensitive search
-        rx file.log "error" --case-sensitive        # Case-sensitive search
-        rx file.log "error" -w                      # Match whole words only
-        rx file.log "error" -A 3                    # Show 3 lines after match
+        rx "error" -i                               # Case-insensitive search
+        rx "error" --case-sensitive                 # Case-sensitive search
+        rx "error" -w                               # Match whole words only
+        rx "error" -A 3                             # Show 3 lines after match
 
     \b
     Requirements:
@@ -310,27 +325,58 @@ def trace_command(
           Fedora: dnf install ripgrep
     """
 
-    # Resolve paths and regexps from positional or named params
-    # Handle multiple paths - always treat as list internally
+    # Resolve patterns from positional or named params
+    final_regexps = []
+    if regexp:
+        # Named parameter --regexp/--regex/-e (tuple from multiple=True)
+        final_regexps.extend(list(regexp))
+
+    # Resolve paths from positional or named params
+    # Separate actual paths from ripgrep flags that may have been captured as positional args
     final_paths = []
+    rg_flags_from_positional = []
+
     if path:
         # Named parameter --path/--file (tuple from multiple=True)
         final_paths.extend(list(path))
-    if path_arg:
-        # Positional PATH argument
-        final_paths.append(path_arg)
 
-    # Handle regexp patterns - always treat as list internally
-    final_regexps = []
-    if regexp:
-        # Named parameter --regexp/-e (tuple from multiple=True)
-        final_regexps.extend(list(regexp))
-    if regex_arg:
-        # Positional REGEX argument
-        final_regexps.append(regex_arg)
+    # Handle pattern_arg: it's a pattern ONLY if no -e flags were used
+    # If -e flags are present, pattern_arg is actually the first path
+    if pattern_arg:
+        if regexp:
+            # -e flags were used, so pattern_arg is actually a path
+            final_paths.append(pattern_arg)
+        else:
+            # No -e flags, so pattern_arg is the pattern
+            final_regexps.append(pattern_arg)
 
-    # Extract extra ripgrep arguments from unknown options
-    rg_extra_args = ctx.args if ctx.args else []
+    if path_args:
+        # Positional PATH arguments - filter out flags (starting with -)
+        # Also handle flag arguments (e.g., -C 1)
+        skip_next = False
+        for i, arg in enumerate(path_args):
+            if skip_next:
+                skip_next = False
+                continue
+
+            if arg.startswith('-'):
+                # This is a ripgrep flag, not a path
+                rg_flags_from_positional.append(arg)
+                # Check if next arg is the flag's value (not starting with -)
+                if i + 1 < len(path_args) and not path_args[i + 1].startswith('-'):
+                    rg_flags_from_positional.append(path_args[i + 1])
+                    skip_next = True
+            else:
+                # This is a path
+                final_paths.append(arg)
+
+    # Default to current directory if no paths specified
+    if not final_paths:
+        final_paths = ['.']
+
+    # Extract extra ripgrep arguments from unknown options and from positional args
+    rg_extra_args = list(ctx.args) if ctx.args else []
+    rg_extra_args.extend(rg_flags_from_positional)
 
     # Apply environment variable defaults for no_cache and no_index
     if not no_cache and os.environ.get('RX_NO_CACHE', '').lower() in ('1', 'true', 'yes'):

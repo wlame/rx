@@ -27,6 +27,7 @@ dependencies = [
     "psutil>=7.1.2",
     "httpx>=0.28.1",
     "zstandard>=0.23.0",
+    "pytest>=8.4.2",
 ]
 
 [project.urls]
@@ -63,7 +64,6 @@ exclude = [
 
 [dependency-groups]
 dev = [
-    "httpx>=0.28.1",
     "pytest>=8.4.2",
     "pytest-asyncio>=1.2.0",
     "pytest-cov>=7.0.0",
