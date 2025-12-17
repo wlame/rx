@@ -4,6 +4,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 from datetime import datetime
 from time import time
 
@@ -291,6 +292,7 @@ def trace_command(
     Usage: rx [OPTIONS] PATTERN [PATH ...]
 
     If PATH is not specified, searches in the current directory.
+    Use '-' as PATH or pipe input to search stdin.
     For multiple patterns, use -e/--regexp/--regex multiple times.
     For multiple paths, use --path/--file multiple times or list them after PATTERN.
 
@@ -302,6 +304,13 @@ def trace_command(
         rx "error" --max-results=10                 # Limit results
         rx "error" --samples                        # Show context lines
         rx "error" --samples --context=5            # Custom context size
+
+    \b
+    Stdin Examples:
+        cat file.log | rx "error"                   # Search piped input
+        echo "test error" | rx "error"              # Search from echo
+        rx "error" -                                # Explicit stdin (- means stdin)
+        docker logs container | rx "error"          # Search container logs
 
     \b
     Multiple Patterns/Paths:
@@ -370,7 +379,41 @@ def trace_command(
                 # This is a path
                 final_paths.append(arg)
 
-    # Default to current directory if no paths specified
+    # Handle stdin input
+    # Check if we should read from stdin:
+    # 1. Explicit '-' as path means stdin
+    # 2. No paths provided AND stdin is not a TTY (piped input)
+    stdin_temp_file = None
+    use_stdin = False
+
+    if '-' in final_paths:
+        use_stdin = True
+        final_paths.remove('-')
+    elif not final_paths and not sys.stdin.isatty():
+        use_stdin = True
+
+    if use_stdin:
+        # Read stdin content and write to temporary file
+        try:
+            stdin_content = sys.stdin.read()
+            if stdin_content:
+                # Create a temporary file with the stdin content
+                fd, stdin_temp_file = tempfile.mkstemp(prefix='rx_stdin_', suffix='.txt', text=True)
+                try:
+                    os.write(fd, stdin_content.encode('utf-8'))
+                finally:
+                    os.close(fd)
+
+                # Add the temp file to paths to search
+                final_paths.append(stdin_temp_file)
+            elif not final_paths:
+                # No stdin content and no other paths - default to current directory
+                final_paths = ['.']
+        except Exception as e:
+            click.echo(f'❌ Error reading stdin: {e}', err=True)
+            sys.exit(1)
+
+    # Default to current directory if no paths specified (and no stdin)
     if not final_paths:
         final_paths = ['.']
 
@@ -396,156 +439,164 @@ def trace_command(
         click.echo('Debug mode enabled - will create .debug_* files', err=True)
 
     if final_paths and final_regexps:
-        # Get effective hook configuration (respects RX_DISABLE_CUSTOM_HOOKS)
-        hooks_config = get_effective_hooks(hook_on_file, hook_on_match, hook_on_complete)
-
-        # Validate: max_results is required when hook_on_match is configured
-        if hooks_config.has_match_hook() and max_results is None:
-            click.echo(
-                '❌ Error: --max-results is required when --hook-on-match is configured.\n'
-                'This prevents accidentally triggering millions of HTTP calls.',
-                err=True,
-            )
-            sys.exit(1)
-
-        # Generate or use provided request_id
-        req_id = request_id or generate_request_id()
-
-        # Store request info
-        request_info = RequestInfo(
-            request_id=req_id,
-            paths=final_paths,
-            patterns=final_regexps,
-            max_results=max_results,
-            started_at=datetime.now(),
-        )
-        store_request(request_info)
-
-        # Calculate context parameters if --samples is requested
-        if samples:
-            before_ctx = before if before is not None else context if context is not None else 3
-            after_ctx = after if after is not None else context if context is not None else 3
-        else:
-            before_ctx = 0
-            after_ctx = 0
-
-        # Create hook callbacks for synchronous calls during parsing
-        def on_match_callback(payload: dict) -> None:
-            """Synchronous callback for match events."""
-            if hooks_config.on_match_url:
-                success = call_hook_sync(hooks_config.on_match_url, payload, 'on_match')
-                increment_hook_counter(req_id, 'on_match', success)
-
-        def on_file_callback(payload: dict) -> None:
-            """Synchronous callback for file scan events."""
-            if hooks_config.on_file_url:
-                success = call_hook_sync(hooks_config.on_file_url, payload, 'on_file')
-                increment_hook_counter(req_id, 'on_file', success)
-
-        # Build HookCallbacks if any hooks are configured
-        hook_callbacks = None
-        if hooks_config.has_any_hook():
-            hook_callbacks = HookCallbacks(
-                on_match_found=on_match_callback if hooks_config.on_match_url else None,
-                on_file_scanned=on_file_callback if hooks_config.on_file_url else None,
-                request_id=req_id,
-            )
-
-        # Parse files or directories for matches
         try:
-            time_before = time()
-            parse_result: ParseResult = parse_paths(
-                final_paths,
-                final_regexps,
+            # Get effective hook configuration (respects RX_DISABLE_CUSTOM_HOOKS)
+            hooks_config = get_effective_hooks(hook_on_file, hook_on_match, hook_on_complete)
+
+            # Validate: max_results is required when hook_on_match is configured
+            if hooks_config.has_match_hook() and max_results is None:
+                click.echo(
+                    '❌ Error: --max-results is required when --hook-on-match is configured.\n'
+                    'This prevents accidentally triggering millions of HTTP calls.',
+                    err=True,
+                )
+                sys.exit(1)
+
+            # Generate or use provided request_id
+            req_id = request_id or generate_request_id()
+
+            # Store request info
+            request_info = RequestInfo(
+                request_id=req_id,
+                paths=final_paths,
+                patterns=final_regexps,
                 max_results=max_results,
-                rg_extra_args=rg_extra_args,
-                context_before=before_ctx,
-                context_after=after_ctx,
-                hooks=hook_callbacks,
-                use_cache=not no_cache,
-                use_index=not no_index,
+                started_at=datetime.now(),
             )
-            parsing_time = time() - time_before
+            store_request(request_info)
 
-            # Update request info with results
-            update_request(
-                req_id,
-                completed_at=datetime.now(),
-                total_matches=len(parse_result.matches),
-                total_files_scanned=len(parse_result.files),
-                total_files_skipped=len(parse_result.skipped_files),
-                total_time_ms=int(parsing_time * 1000),
-            )
+            # Calculate context parameters if --samples is requested
+            if samples:
+                before_ctx = before if before is not None else context if context is not None else 3
+                after_ctx = after if after is not None else context if context is not None else 3
+            else:
+                before_ctx = 0
+                after_ctx = 0
 
-            # Call on_complete hook if configured
-            if hooks_config.on_complete_url:
-                complete_payload: dict = TraceCompletePayload(
+            # Create hook callbacks for synchronous calls during parsing
+            def on_match_callback(payload: dict) -> None:
+                """Synchronous callback for match events."""
+                if hooks_config.on_match_url:
+                    success = call_hook_sync(hooks_config.on_match_url, payload, 'on_match')
+                    increment_hook_counter(req_id, 'on_match', success)
+
+            def on_file_callback(payload: dict) -> None:
+                """Synchronous callback for file scan events."""
+                if hooks_config.on_file_url:
+                    success = call_hook_sync(hooks_config.on_file_url, payload, 'on_file')
+                    increment_hook_counter(req_id, 'on_file', success)
+
+            # Build HookCallbacks if any hooks are configured
+            hook_callbacks = None
+            if hooks_config.has_any_hook():
+                hook_callbacks = HookCallbacks(
+                    on_match_found=on_match_callback if hooks_config.on_match_url else None,
+                    on_file_scanned=on_file_callback if hooks_config.on_file_url else None,
                     request_id=req_id,
-                    paths=','.join(final_paths),
-                    patterns=','.join(final_regexps),
+                )
+
+            # Parse files or directories for matches
+            try:
+                time_before = time()
+                parse_result: ParseResult = parse_paths(
+                    final_paths,
+                    final_regexps,
+                    max_results=max_results,
+                    rg_extra_args=rg_extra_args,
+                    context_before=before_ctx,
+                    context_after=after_ctx,
+                    hooks=hook_callbacks,
+                    use_cache=not no_cache,
+                    use_index=not no_index,
+                )
+                parsing_time = time() - time_before
+
+                # Update request info with results
+                update_request(
+                    req_id,
+                    completed_at=datetime.now(),
+                    total_matches=len(parse_result.matches),
                     total_files_scanned=len(parse_result.files),
                     total_files_skipped=len(parse_result.skipped_files),
-                    total_matches=len(parse_result.matches),
                     total_time_ms=int(parsing_time * 1000),
-                ).model_dump()
-                success = call_hook_sync(hooks_config.on_complete_url, complete_payload, 'on_complete')
-                increment_hook_counter(req_id, 'on_complete', success)
+                )
 
-        except FileNotFoundError as e:
-            click.echo(f'❌ Error: {e}', err=True)
-            sys.exit(1)
-        except RuntimeError as e:
-            click.echo(f'❌ Error: {e}', err=True)
-            sys.exit(1)
-        except Exception as e:
-            click.echo(f'❌ Unexpected error: {e}', err=True)
-            sys.exit(1)
+                # Call on_complete hook if configured
+                if hooks_config.on_complete_url:
+                    complete_payload: dict = TraceCompletePayload(
+                        request_id=req_id,
+                        paths=','.join(final_paths),
+                        patterns=','.join(final_regexps),
+                        total_files_scanned=len(parse_result.files),
+                        total_files_skipped=len(parse_result.skipped_files),
+                        total_matches=len(parse_result.matches),
+                        total_time_ms=int(parsing_time * 1000),
+                    ).model_dump()
+                    success = call_hook_sync(hooks_config.on_complete_url, complete_payload, 'on_complete')
+                    increment_hook_counter(req_id, 'on_complete', success)
 
-        # Build response object
-        # Convert context_lines to proper format if present
-        converted_context = None
-        if parse_result.context_lines:
-            converted_context = {}
-            for key, ctx_lines in parse_result.context_lines.items():
-                # Convert ContextLine objects to dict for serialization
-                converted_context[key] = ctx_lines
+            except FileNotFoundError as e:
+                click.echo(f'❌ Error: {e}', err=True)
+                sys.exit(1)
+            except RuntimeError as e:
+                click.echo(f'❌ Error: {e}', err=True)
+                sys.exit(1)
+            except Exception as e:
+                click.echo(f'❌ Unexpected error: {e}', err=True)
+                sys.exit(1)
 
-        response = TraceResponse(
-            request_id=req_id,
-            path=final_paths,  # Pass as list directly
-            time=parsing_time,
-            patterns=parse_result.patterns,
-            files=parse_result.files,
-            matches=[Match(**m) for m in parse_result.matches],
-            scanned_files=parse_result.scanned_files,
-            skipped_files=parse_result.skipped_files,
-            file_chunks=parse_result.file_chunks,
-            context_lines=converted_context,
-            before_context=before_ctx if samples else None,
-            after_context=after_ctx if samples else None,
-            max_results=max_results,  # Include max_results in response
-        )
+            # Build response object
+            # Convert context_lines to proper format if present
+            converted_context = None
+            if parse_result.context_lines:
+                converted_context = {}
+                for key, ctx_lines in parse_result.context_lines.items():
+                    # Convert ContextLine objects to dict for serialization
+                    converted_context[key] = ctx_lines
 
-        # Handle --samples flag
-        if samples:
-            handle_samples_output(
-                response=response,
-                pattern_ids=parse_result.patterns,
-                file_ids=parse_result.files,
-                before_ctx=before_ctx,
-                after_ctx=after_ctx,
-                output_json=output_json,
-                no_color=no_color,
+            response = TraceResponse(
+                request_id=req_id,
+                path=final_paths,  # Pass as list directly
+                time=parsing_time,
+                patterns=parse_result.patterns,
+                files=parse_result.files,
+                matches=[Match(**m) for m in parse_result.matches],
+                scanned_files=parse_result.scanned_files,
+                skipped_files=parse_result.skipped_files,
+                file_chunks=parse_result.file_chunks,
+                context_lines=converted_context,
+                before_context=before_ctx if samples else None,
+                after_context=after_ctx if samples else None,
+                max_results=max_results,  # Include max_results in response
             )
-        else:
-            # No samples - just show matches
-            if output_json:
-                click.echo(response.model_dump_json(indent=2))
-            else:
-                colorize = not no_color
-                click.echo(response.to_cli(colorize=colorize))
 
-        sys.exit(0)
+            # Handle --samples flag
+            if samples:
+                handle_samples_output(
+                    response=response,
+                    pattern_ids=parse_result.patterns,
+                    file_ids=parse_result.files,
+                    before_ctx=before_ctx,
+                    after_ctx=after_ctx,
+                    output_json=output_json,
+                    no_color=no_color,
+                )
+            else:
+                # No samples - just show matches
+                if output_json:
+                    click.echo(response.model_dump_json(indent=2))
+                else:
+                    colorize = not no_color
+                    click.echo(response.to_cli(colorize=colorize))
+
+            sys.exit(0)
+        finally:
+            # Clean up temporary stdin file if it was created
+            if stdin_temp_file and os.path.exists(stdin_temp_file):
+                try:
+                    os.unlink(stdin_temp_file)
+                except Exception:
+                    pass  # Ignore cleanup errors
 
     # No valid mode provided - show help
     ctx = click.get_current_context()

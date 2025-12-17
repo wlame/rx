@@ -96,6 +96,10 @@ rx /var/log/ "error.*"
 # Show context lines
 rx /var/log/app.log "error" --samples --context=3
 
+# Search piped input (like grep)
+cat /var/log/app.log | rx "error"
+docker logs mycontainer | rx "error"
+
 # Analyze file metadata
 rx analyse /var/log/app.log
 
@@ -167,6 +171,13 @@ rx /var/log/ "error.*"                     # Search directory
 rx /var/log/app.log "error" --samples      # Show context lines
 rx /var/log/app.log "error" -i             # Case-insensitive (ripgrep flags work)
 rx /var/log/app.log "error" --json         # JSON output
+
+# Pipe input from other commands
+cat /var/log/app.log | rx "error"          # Search piped input
+docker logs mycontainer | rx "error"       # Search container logs
+tail -f /var/log/app.log | rx "error"      # Search live log stream
+echo "test error" | rx "error"             # Search from echo
+rx "error" -                               # Read from stdin (- means stdin)
 ```
 
 ### `rx analyse`
