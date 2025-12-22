@@ -507,10 +507,11 @@ class TestSamplesLineOffsetErrors:
         assert 'out of bounds' in result.output or 'EOF reached' in result.output
 
     def test_line_offset_negative(self):
-        """Test negative line number - should return error."""
+        """Test negative line number - gets last line."""
         result = self.runner.invoke(samples_command, [self.test_file, '-l', '-1'])
-        assert result.exit_code != 0  # Should fail with error
-        assert 'out of bounds' in result.output or 'EOF reached' in result.output
+        assert result.exit_code == 0  # Should succeed
+        # Should get the last line (line 3 in this test file)
+        assert 'Line 3' in result.output
 
 
 class TestSamplesLineOffsetEdgeCases:
@@ -824,3 +825,192 @@ class TestSamplesLineEndingConsistency:
 
         # Verify the line number mapping is also correct
         assert data2['offsets'][str(line2_offset)] == 2, 'Byte offset should map back to line 2'
+
+
+class TestSamplesNegativeOffsets:
+    """Test negative offset support for rx samples command."""
+
+    def setup_method(self):
+        """Create test files before each test."""
+        self.runner = CliRunner()
+        self.temp_dir = tempfile.mkdtemp()
+
+        # Create a test file with known lines
+        self.test_file = os.path.join(self.temp_dir, 'test.log')
+        self.lines = [f'Line {i}: content here\n' for i in range(1, 11)]  # 10 lines
+        with open(self.test_file, 'w') as f:
+            f.writelines(self.lines)
+
+    def test_negative_line_offset_last_line(self):
+        """Test -l -1 gets the last line."""
+        result = self.runner.invoke(samples_command, [self.test_file, '-l', '-1', '--context', '0'])
+        assert result.exit_code == 0
+        assert 'Line 10:' in result.output
+        # Should not contain other lines
+        assert 'Line 9:' not in result.output
+        assert 'Line 8:' not in result.output
+
+    def test_negative_line_offset_second_to_last(self):
+        """Test -l -2 gets the second to last line."""
+        result = self.runner.invoke(samples_command, [self.test_file, '-l', '-2', '--context', '0'])
+        assert result.exit_code == 0
+        assert 'Line 9:' in result.output
+        assert 'Line 10:' not in result.output
+
+    def test_negative_line_offset_fifth_from_end(self):
+        """Test -l -5 gets the 5th line from the end."""
+        result = self.runner.invoke(samples_command, [self.test_file, '-l', '-5', '--context', '0'])
+        assert result.exit_code == 0
+        # File has 10 lines, -5 should be line 6
+        assert 'Line 6:' in result.output
+
+    def test_negative_line_offset_with_context(self):
+        """Test negative line offset with context."""
+        result = self.runner.invoke(samples_command, [self.test_file, '-l', '-3', '--context', '1'])
+        assert result.exit_code == 0
+        # File has 10 lines, -3 should be line 8
+        # With context of 1: should show lines 7, 8, 9
+        assert 'Line 7:' in result.output
+        assert 'Line 8:' in result.output
+        assert 'Line 9:' in result.output
+        assert 'Line 6:' not in result.output
+        assert 'Line 10:' not in result.output
+
+    def test_negative_line_offset_beyond_file_start(self):
+        """Test negative offset beyond file start - should clamp to line 1."""
+        result = self.runner.invoke(samples_command, [self.test_file, '-l', '-100', '--context', '0'])
+        assert result.exit_code == 0
+        # Should clamp to line 1
+        assert 'Line 1:' in result.output
+
+    def test_negative_line_offset_json(self):
+        """Test negative line offset with JSON output."""
+        result = self.runner.invoke(samples_command, [self.test_file, '-l', '-1', '--json'])
+        assert result.exit_code == 0
+
+        # Handle potential stderr messages mixed in output (like "Analyzing file...")
+        output = result.output
+        if output.startswith('Analyzing') or output.startswith('Building') or output.startswith('Counting'):
+            # Skip the first line (stderr message) and parse the JSON
+            output = '\n'.join(output.split('\n')[1:])
+
+        data = json.loads(output)
+        # Should have line 10 in samples (the last line)
+        assert '10' in data['samples']
+        sample_lines = data['samples']['10']
+        assert any('Line 10:' in line for line in sample_lines)
+
+    def test_negative_byte_offset_last_byte(self):
+        """Test -b -1 gets content near the last byte of the file."""
+        result = self.runner.invoke(samples_command, [self.test_file, '-b', '-1', '--context', '0'])
+        assert result.exit_code == 0
+        # Last byte should be in the last line
+        assert 'Line 10:' in result.output
+
+    def test_negative_byte_offset_from_end(self):
+        """Test negative byte offset counting from end."""
+        import os
+
+        file_size = os.path.getsize(self.test_file)
+        # Get offset 50 bytes from end
+        result = self.runner.invoke(samples_command, [self.test_file, '-b', '-50', '--context', '0'])
+        assert result.exit_code == 0
+        # Should get a line near the end (line 8, 9 or 10 depending on exact size)
+        assert 'Line 8:' in result.output or 'Line 9:' in result.output or 'Line 10:' in result.output
+
+    def test_negative_byte_offset_json(self):
+        """Test negative byte offset with JSON output."""
+        result = self.runner.invoke(samples_command, [self.test_file, '-b', '-10', '--json'])
+        assert result.exit_code == 0
+
+        data = json.loads(result.output)
+        # Should have an offset in samples
+        assert len(data['samples']) > 0
+        # Should be near the end of file
+        assert len(data['offsets']) > 0
+
+    def test_mixed_positive_and_negative_lines(self):
+        """Test mixing positive and negative line offsets."""
+        result = self.runner.invoke(samples_command, [self.test_file, '-l', '1', '-l', '-1', '--context', '0'])
+        assert result.exit_code == 0
+        # Should have both first and last line
+        assert 'Line 1:' in result.output
+        assert 'Line 10:' in result.output
+
+    def test_mixed_positive_and_negative_bytes(self):
+        """Test mixing positive and negative byte offsets."""
+        result = self.runner.invoke(samples_command, [self.test_file, '-b', '0', '-b', '-10', '--context', '0'])
+        assert result.exit_code == 0
+        # Should have content from start and end
+        assert 'Line 1:' in result.output
+        # Last offset should be near the end
+        assert 'Line 9:' in result.output or 'Line 10:' in result.output
+
+    def test_multiple_negative_line_offsets(self):
+        """Test multiple negative line offsets."""
+        result = self.runner.invoke(
+            samples_command, [self.test_file, '-l', '-1', '-l', '-5', '-l', '-10', '--context', '0']
+        )
+        assert result.exit_code == 0
+        # -1 = line 10, -5 = line 6, -10 = line 1
+        assert 'Line 10:' in result.output
+        assert 'Line 6:' in result.output
+        assert 'Line 1:' in result.output
+
+    def test_negative_offset_with_before_after_context(self):
+        """Test negative offset with --before and --after options."""
+        result = self.runner.invoke(samples_command, [self.test_file, '-l', '-2', '--before', '1', '--after', '1'])
+        assert result.exit_code == 0
+        # -2 = line 9, with before=1 and after=1: lines 8, 9, 10
+        assert 'Line 8:' in result.output
+        assert 'Line 9:' in result.output
+        assert 'Line 10:' in result.output
+        assert 'Line 7:' not in result.output
+
+    def test_negative_byte_offset_beyond_file_start(self):
+        """Test negative byte offset beyond file start - should clamp to 0."""
+        import os
+
+        file_size = os.path.getsize(self.test_file)
+        # Request offset way beyond file size
+        result = self.runner.invoke(samples_command, [self.test_file, '-b', str(-(file_size + 1000)), '--context', '0'])
+        assert result.exit_code == 0
+        # Should clamp to start and show line 1
+        assert 'Line 1:' in result.output
+
+
+class TestSamplesNegativeOffsetErrors:
+    """Test error handling for negative offsets."""
+
+    def setup_method(self):
+        """Create test environment."""
+        self.runner = CliRunner()
+        self.temp_dir = tempfile.mkdtemp()
+
+        self.test_file = os.path.join(self.temp_dir, 'test.txt')
+        with open(self.test_file, 'w') as f:
+            f.write('Line 1\nLine 2\nLine 3\n')
+
+    def test_negative_range_not_allowed_start(self):
+        """Test that ranges with negative start value are rejected."""
+        result = self.runner.invoke(samples_command, [self.test_file, '-l', '-5-10'])
+        assert result.exit_code != 0
+        assert 'Invalid' in result.output
+
+    def test_negative_range_not_allowed_end(self):
+        """Test that ranges with negative end value are rejected."""
+        result = self.runner.invoke(samples_command, [self.test_file, '-l', '5--10'])
+        assert result.exit_code != 0
+        assert 'Invalid' in result.output
+
+    def test_negative_range_both_negative(self):
+        """Test that ranges with both negative values are rejected."""
+        result = self.runner.invoke(samples_command, [self.test_file, '-l', '-10--5'])
+        assert result.exit_code != 0
+        assert 'Invalid' in result.output
+
+    def test_negative_byte_range_not_allowed(self):
+        """Test that negative byte ranges are rejected."""
+        result = self.runner.invoke(samples_command, [self.test_file, '-b', '-100--50'])
+        assert result.exit_code != 0
+        assert 'Invalid' in result.output

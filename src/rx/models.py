@@ -799,23 +799,33 @@ class SamplesResponse(BaseModel):
         # Determine which mode we're in (offsets or lines)
         if self.offsets:
             for offset_str in self.offsets:
-                offset = int(offset_str)
-                key = str(offset)
+                key = offset_str
                 if key in self.samples:
                     # Get line number from offsets dict
                     line_num = self.offsets[offset_str]
 
-                    # Format: file:line:offset
-                    if colorize:
-                        header = (
-                            f'=== {CYAN}{self.path}{RESET}'
-                            f'{GREY}:{RESET}'
-                            f'{YELLOW}{line_num}{RESET}'
-                            f'{GREY}:{RESET}'
-                            f'{LIGHT_GREY}{offset}{RESET} ==='
-                        )
+                    # Check if this is a range key (contains dash)
+                    if '-' in offset_str:
+                        # Range format
+                        if colorize:
+                            header = f'=== {CYAN}{self.path}{RESET}{GREY}:{RESET}{YELLOW}bytes {offset_str}{RESET} ==='
+                        else:
+                            header = f'=== {self.path}:bytes {offset_str} ==='
                     else:
-                        header = f'=== {self.path}:{line_num}:{offset} ==='
+                        # Single offset
+                        offset = int(offset_str)
+                        # Format: file:line:offset
+                        if colorize:
+                            header = (
+                                f'=== {CYAN}{self.path}{RESET}'
+                                f'{GREY}:{RESET}'
+                                f'{YELLOW}{line_num}{RESET}'
+                                f'{GREY}:{RESET}'
+                                f'{LIGHT_GREY}{offset}{RESET} ==='
+                            )
+                        else:
+                            header = f'=== {self.path}:{line_num}:{offset} ==='
+
                     output_lines.append(header)
 
                     context_lines = self.samples[key]
@@ -831,23 +841,35 @@ class SamplesResponse(BaseModel):
                     output_lines.append('')
         elif self.lines:
             for line_num_str in self.lines:
-                line_num = int(line_num_str)
-                key = str(line_num)
+                key = line_num_str
                 if key in self.samples:
                     # Get byte offset from lines dict
                     byte_offset = self.lines[line_num_str]
 
-                    # Format: file:line:offset
-                    if colorize:
-                        header = (
-                            f'=== {CYAN}{self.path}{RESET}'
-                            f'{GREY}:{RESET}'
-                            f'{YELLOW}{line_num}{RESET}'
-                            f'{GREY}:{RESET}'
-                            f'{LIGHT_GREY}{byte_offset}{RESET} ==='
-                        )
+                    # Check if this is a range key (contains dash)
+                    if '-' in line_num_str:
+                        # Range format
+                        if colorize:
+                            header = (
+                                f'=== {CYAN}{self.path}{RESET}{GREY}:{RESET}{YELLOW}lines {line_num_str}{RESET} ==='
+                            )
+                        else:
+                            header = f'=== {self.path}:lines {line_num_str} ==='
                     else:
-                        header = f'=== {self.path}:{line_num}:{byte_offset} ==='
+                        # Single line
+                        line_num = int(line_num_str)
+                        # Format: file:line:offset
+                        if colorize:
+                            header = (
+                                f'=== {CYAN}{self.path}{RESET}'
+                                f'{GREY}:{RESET}'
+                                f'{YELLOW}{line_num}{RESET}'
+                                f'{GREY}:{RESET}'
+                                f'{LIGHT_GREY}{byte_offset}{RESET} ==='
+                            )
+                        else:
+                            header = f'=== {self.path}:{line_num}:{byte_offset} ==='
+
                     output_lines.append(header)
 
                     context_lines = self.samples[key]

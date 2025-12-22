@@ -66,6 +66,13 @@ if [ -f "dist/rx" ]; then
     # Make binary executable
     chmod +x dist/rx
 
+    # Re-sign binary for macOS (prevents "killed" on Apple Silicon)
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        echo "Re-signing binary for macOS..."
+        codesign --force --deep --sign - dist/rx
+        echo -e "${GREEN}✓ Binary signed${NC}"
+    fi
+
     BINARY_SIZE=$(du -sh dist/rx | cut -f1)
     echo "Binary size: $BINARY_SIZE"
     echo -e "${GREEN}✓ Standalone binary ready${NC}"

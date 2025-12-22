@@ -5,72 +5,254 @@ import sys
 
 import click
 
+from rx.analyse_cache import load_cache
 from rx.compressed_index import get_decompressed_content_at_line, get_or_build_compressed_index
 from rx.compression import CompressionFormat, detect_compression, is_compressed
 from rx.file_utils import get_context, get_context_by_lines, is_text_file
-from rx.index import calculate_exact_line_for_offset, calculate_exact_offset_for_line, get_index_path, load_index
+from rx.index import (
+    calculate_exact_line_for_offset,
+    calculate_exact_offset_for_line,
+    create_index_file,
+    get_index_path,
+    is_index_valid,
+    load_index,
+)
 from rx.models import SamplesResponse
 
 
-@click.command("samples")
-@click.argument("path", type=click.Path(exists=True))
+def parse_offset_or_range(value: str) -> tuple[int, int | None]:
+    """Parse an offset string that can be either a single number or a range.
+
+    Args:
+        value: String like "100", "-5" (negative index), or "100-200" (range)
+
+    Returns:
+        Tuple of (start, end) where end is None for single values.
+        Negative single values are allowed (will be converted later based on file size).
+        Negative values in ranges are NOT allowed.
+
+    Raises:
+        ValueError: If the format is invalid
+    """
+    value = value.strip()
+
+    # Try to parse as single integer first (handles both positive and negative numbers)
+    try:
+        num = int(value)
+        # Allow negative numbers for single values (will be converted later based on file size)
+        return (num, None)
+    except ValueError:
+        # If it contains a dash and isn't a simple negative number, try parsing as range
+        if '-' in value and not value.startswith('-'):
+            # Range format: "100-200"
+            parts = value.split('-')
+            if len(parts) != 2:
+                raise ValueError(f'Invalid range format: {value}. Expected format: START-END')
+            try:
+                start = int(parts[0])
+                end = int(parts[1])
+            except ValueError:
+                raise ValueError(f'Invalid range format: {value}. Both values must be integers')
+
+            # Ranges cannot have negative values
+            if start < 0 or end < 0:
+                raise ValueError(f'Invalid range: {value}. Ranges cannot contain negative values')
+            if start > end:
+                raise ValueError(f'Invalid range: {value}. Start must be <= end')
+            return (start, end)
+        else:
+            # Re-raise the original error for invalid integers
+            raise ValueError(f'Invalid offset: {value}. Must be an integer or range (e.g., 100-200)')
+
+
+def get_lines_for_byte_range(path: str, start_offset: int, end_offset: int, index_data) -> list[str]:
+    """Get all lines that overlap with a byte offset range.
+
+    For each offset in the range, find which line contains it and include that line.
+    Returns lines from the first line containing start_offset to the last line containing end_offset.
+    """
+    # Find line numbers for start and end offsets
+    start_line = calculate_exact_line_for_offset(path, start_offset, index_data)
+    end_line = calculate_exact_line_for_offset(path, end_offset, index_data)
+
+    # Read the file and extract lines
+    with open(path, encoding='utf-8', errors='replace') as f:
+        lines = f.readlines()
+
+    # Return lines from start_line to end_line (1-based to 0-based conversion)
+    if start_line > len(lines) or end_line > len(lines):
+        return []
+
+    return [line.rstrip('\n\r') for line in lines[start_line - 1 : end_line]]
+
+
+def get_line_range(path: str, start_line: int, end_line: int) -> list[str]:
+    """Get lines from start_line to end_line (inclusive, 1-based).
+
+    Args:
+        path: File path
+        start_line: Starting line number (1-based)
+        end_line: Ending line number (1-based, inclusive)
+
+    Returns:
+        List of lines in the range
+    """
+    with open(path, encoding='utf-8', errors='replace') as f:
+        lines = f.readlines()
+
+    # Validate line numbers
+    if start_line < 1 or end_line < 1:
+        return []
+    if start_line > len(lines):
+        return []
+
+    # Clamp end_line to file length
+    actual_end = min(end_line, len(lines))
+
+    return [line.rstrip('\n\r') for line in lines[start_line - 1 : actual_end]]
+
+
+def get_total_line_count(path: str) -> int:
+    """Get total line count for a file using cached data or by counting.
+
+    Strategy:
+    1. Try to get from analysis cache (fastest, most accurate)
+    2. Try to get from index cache + counting remaining lines
+    3. For large files: build index first, then use strategy 2
+    4. For small files: run analysis, then use strategy 1
+    5. Fallback: count all lines directly
+
+    Args:
+        path: File path
+
+    Returns:
+        Total number of lines in the file
+    """
+    import os
+
+    from rx.analyse import FileAnalyzer
+    from rx.index import get_large_file_threshold_bytes
+
+    # Strategy 1: Try analysis cache first
+    cache_data = load_cache(path)
+    if cache_data and 'analysis_content' in cache_data and cache_data['analysis_content'].get('line_count'):
+        return cache_data['analysis_content']['line_count']
+
+    # Strategy 2: Try index cache
+    if is_index_valid(path):
+        index_path = get_index_path(path)
+        index_data = load_index(index_path)
+        if index_data and 'line_index' in index_data:
+            line_index = index_data['line_index']
+            if line_index:
+                # Get the last indexed line number and offset
+                last_line, last_offset = line_index[-1]
+
+                # Count remaining lines after the last indexed position
+                remaining_lines = 0
+                with open(path, 'rb') as f:
+                    f.seek(last_offset)
+                    # Read from last indexed position to end
+                    for _ in f:
+                        remaining_lines += 1
+
+                # Total = last indexed line + remaining lines - 1
+                # (subtract 1 because last_line is already counted)
+                return last_line + remaining_lines - 1
+
+    # Strategy 3 & 4: For files without cache, decide based on size
+    file_size = os.path.getsize(path)
+    large_file_threshold = get_large_file_threshold_bytes()
+
+    if file_size >= large_file_threshold:
+        # Large file: build index first
+        click.echo('Building index for large file...', err=True)
+        create_index_file(path)
+        # Now retry with index
+        index_data = load_index(get_index_path(path))
+        if index_data and 'line_index' in index_data:
+            line_index = index_data['line_index']
+            if line_index:
+                last_line, last_offset = line_index[-1]
+                remaining_lines = 0
+                with open(path, 'rb') as f:
+                    f.seek(last_offset)
+                    for _ in f:
+                        remaining_lines += 1
+                return last_line + remaining_lines - 1
+    else:
+        # Small file: run analysis
+        click.echo('Analyzing file...', err=True)
+        analyzer = FileAnalyzer()
+        analysis_result = analyzer.analyze_file(path, 'temp')
+        if analysis_result and analysis_result.line_count:
+            return analysis_result.line_count
+
+    # Fallback: count lines directly
+    click.echo('Counting lines...', err=True)
+    with open(path, 'rb') as f:
+        return sum(1 for _ in f)
+
+
+@click.command('samples')
+@click.argument('path', type=click.Path(exists=True))
 @click.option(
-    "--byte-offset",
-    "-b",
+    '--byte-offset',
+    '-b',
     multiple=True,
-    type=int,
-    help="Byte offset(s) to get context for. Can be specified multiple times.",
+    type=str,
+    help='Byte offset(s) or range. Single offset (1234) gets context. Negative offset (-100) counts from end. Range (1000-2000) gets exact bytes. Can be specified multiple times.',
 )
 @click.option(
-    "--line-offset",
-    "-l",
+    '--line-offset',
+    '-l',
     multiple=True,
-    type=int,
-    help="Line number(s) to get context for (1-based). Can be specified multiple times.",
+    type=str,
+    help='Line number(s) or range (1-based). Single line (100) gets context. Negative line (-5) counts from end. Range (100-200) gets exact lines. Can be specified multiple times.',
 )
 @click.option(
-    "--context",
-    "-c",
-    type=int,
-    default=None,
-    help="Number of context lines before and after (default: 3)",
-)
-@click.option(
-    "--before",
-    "-B",
+    '--context',
+    '-c',
     type=int,
     default=None,
-    help="Number of context lines before offset",
+    help='Number of context lines before and after (default: 3)',
 )
 @click.option(
-    "--after",
-    "-A",
+    '--before',
+    '-B',
     type=int,
     default=None,
-    help="Number of context lines after offset",
+    help='Number of context lines before offset',
 )
 @click.option(
-    "--json",
-    "json_output",
+    '--after',
+    '-A',
+    type=int,
+    default=None,
+    help='Number of context lines after offset',
+)
+@click.option(
+    '--json',
+    'json_output',
     is_flag=True,
-    help="Output in JSON format",
+    help='Output in JSON format',
 )
 @click.option(
-    "--no-color",
+    '--no-color',
     is_flag=True,
-    help="Disable colored output",
+    help='Disable colored output',
 )
 @click.option(
-    "--regex",
-    "-r",
+    '--regex',
+    '-r',
     type=str,
     default=None,
-    help="Regex pattern to highlight in output",
+    help='Regex pattern to highlight in output',
 )
 def samples_command(
     path: str,
-    byte_offset: tuple[int, ...],
-    line_offset: tuple[int, ...],
+    byte_offset: tuple[str, ...],
+    line_offset: tuple[str, ...],
     context: int | None,
     before: int | None,
     after: int | None,
@@ -87,6 +269,11 @@ def samples_command(
     Use -b/--byte-offset for byte offsets, or -l/--line-offset for line numbers.
     These options are mutually exclusive.
 
+    You can specify either single values (which use context) or ranges (which get exact lines):
+    - Single value: -l 100 gets line 100 with context (default 3 lines before/after)
+    - Range: -l 100-200 gets exactly lines 100-200, ignoring context settings
+    - Mix both: -l 50 -l 100-200 -c 5 gets line 50 with 5 lines context, plus lines 100-200
+
     Examples:
 
         rx samples /var/log/app.log -b 1234
@@ -98,14 +285,20 @@ def samples_command(
         rx samples /var/log/app.log -l 100 --before=2 --after=10
 
         rx samples /var/log/app.log -b 1234 --json
+
+        rx samples /var/log/app.log -l 100-200
+
+        rx samples /var/log/app.log -l 50 -l 100-200 --context=5
+
+        rx samples /var/log/app.log -b 1000-5000
     """
     # Validate mutual exclusivity
     if byte_offset and line_offset:
-        click.echo("Error: Cannot use both --byte-offset and --line-offset. Choose one.", err=True)
+        click.echo('Error: Cannot use both --byte-offset and --line-offset. Choose one.', err=True)
         sys.exit(1)
 
     if not byte_offset and not line_offset:
-        click.echo("Error: Must provide either --byte-offset (-b) or --line-offset (-l)", err=True)
+        click.echo('Error: Must provide either --byte-offset (-b) or --line-offset (-l)', err=True)
         sys.exit(1)
 
     # Check if file is compressed
@@ -115,14 +308,14 @@ def samples_command(
     # Compressed files only support line offset mode
     if file_is_compressed and byte_offset:
         click.echo(
-            "Error: Byte offsets are not supported for compressed files. Use --line-offset (-l) instead.",
+            'Error: Byte offsets are not supported for compressed files. Use --line-offset (-l) instead.',
             err=True,
         )
         sys.exit(1)
 
     # Validate file is text (skip for compressed files as we can't easily check)
     if not file_is_compressed and not is_text_file(path):
-        click.echo(f"Error: {path} is not a text file", err=True)
+        click.echo(f'Error: {path} is not a text file', err=True)
         sys.exit(1)
 
     # Determine context lines
@@ -130,7 +323,17 @@ def samples_command(
     after_context = after if after is not None else context if context is not None else 3
 
     if before_context < 0 or after_context < 0:
-        click.echo("Error: Context values must be non-negative", err=True)
+        click.echo('Error: Context values must be non-negative', err=True)
+        sys.exit(1)
+
+    # Parse offsets/lines to separate single values from ranges
+    try:
+        if byte_offset:
+            parsed_offsets = [parse_offset_or_range(val) for val in byte_offset]
+        else:
+            parsed_offsets = [parse_offset_or_range(val) for val in line_offset]
+    except ValueError as e:
+        click.echo(f'Error: {e}', err=True)
         sys.exit(1)
 
     try:
@@ -143,7 +346,7 @@ def samples_command(
 
             if is_seekable_zstd(path):
                 # Use seekable zstd index for accurate line numbers
-                click.echo(f"Processing seekable zstd file...", err=True)
+                click.echo('Processing seekable zstd file...', err=True)
                 from rx.seekable_index import get_or_build_index
                 from rx.seekable_zstd import decompress_frame, read_seek_table
 
@@ -194,7 +397,7 @@ def samples_command(
                     context_data[line_num] = frame_lines[start_idx:end_idx]
             else:
                 # Use generic compressed index for other formats
-                click.echo(f"Processing compressed file ({compression_format.value})...", err=True)
+                click.echo(f'Processing compressed file ({compression_format.value})...', err=True)
                 index_data = get_or_build_compressed_index(path)
 
                 # Get samples for each line
@@ -234,16 +437,38 @@ def samples_command(
             return
 
         if byte_offset:
-            # Byte offset mode
-            offset_list = list(byte_offset)
-            context_data = get_context(path, offset_list, before_context, after_context)
+            # Byte offset mode - handle both single offsets and ranges
+            import os
 
-            # Calculate line numbers for each byte offset
-            offset_to_line = {}
             index_data = load_index(get_index_path(path))
-            for offset in offset_list:
-                line_num = calculate_exact_line_for_offset(path, offset, index_data)
-                offset_to_line[str(offset)] = line_num
+            context_data = {}
+            offset_to_line = {}
+
+            # Get file size for negative offset conversion
+            file_size = os.path.getsize(path)
+
+            for start, end in parsed_offsets:
+                # Convert negative offsets to positive
+                if end is None and start < 0:
+                    # Negative single offset - convert using file size
+                    # -1 means last byte (file_size - 1), -2 means file_size - 2, etc.
+                    start = file_size + start
+                    if start < 0:
+                        start = 0  # Clamp to start of file
+                if end is None:
+                    # Single offset - use context
+                    offset_context = get_context(path, [start], before_context, after_context)
+                    context_data.update(offset_context)
+                    line_num = calculate_exact_line_for_offset(path, start, index_data)
+                    offset_to_line[str(start)] = line_num
+                else:
+                    # Range - get exact lines covering the byte range, ignore context
+                    range_key = f'{start}-{end}'
+                    lines = get_lines_for_byte_range(path, start, end, index_data)
+                    context_data[range_key] = lines
+                    # For ranges, we store the start line number
+                    start_line = calculate_exact_line_for_offset(path, start, index_data)
+                    offset_to_line[range_key] = start_line
 
             response = SamplesResponse(
                 path=path,
@@ -254,16 +479,39 @@ def samples_command(
                 samples={str(k): v for k, v in context_data.items()},
             )
         else:
-            # Line offset mode
-            line_list = list(line_offset)
-            context_data = get_context_by_lines(path, line_list, before_context, after_context)
-
-            # Calculate byte offsets for each line number
-            line_to_offset = {}
+            # Line offset mode - handle both single lines and ranges
             index_data = load_index(get_index_path(path))
-            for line_num in line_list:
-                byte_offset = calculate_exact_offset_for_line(path, line_num, index_data)
-                line_to_offset[str(line_num)] = byte_offset
+            context_data = {}
+            line_to_offset = {}
+
+            # Get total line count for negative offset conversion (only if needed)
+            total_lines = None
+            needs_total_lines = any(start < 0 for start, end in parsed_offsets if end is None)
+            if needs_total_lines:
+                total_lines = get_total_line_count(path)
+
+            for start, end in parsed_offsets:
+                # Convert negative line numbers to positive
+                if end is None and start < 0:
+                    # Negative single line - convert using total line count
+                    # -1 means last line, -2 means second to last, etc.
+                    start = total_lines + start + 1
+                    if start < 1:
+                        start = 1  # Clamp to first line
+                if end is None:
+                    # Single line - use context
+                    line_context = get_context_by_lines(path, [start], before_context, after_context)
+                    context_data.update(line_context)
+                    byte_offset_val = calculate_exact_offset_for_line(path, start, index_data)
+                    line_to_offset[str(start)] = byte_offset_val
+                else:
+                    # Range - get exact lines, ignore context
+                    range_key = f'{start}-{end}'
+                    lines = get_line_range(path, start, end)
+                    context_data[range_key] = lines
+                    # For ranges, we store the byte offset of the start line
+                    byte_offset_val = calculate_exact_offset_for_line(path, start, index_data)
+                    line_to_offset[range_key] = byte_offset_val
 
             response = SamplesResponse(
                 path=path,
@@ -281,8 +529,8 @@ def samples_command(
             click.echo(response.to_cli(colorize=colorize, regex=regex))
 
     except ValueError as e:
-        click.echo(f"Error: {e}", err=True)
+        click.echo(f'Error: {e}', err=True)
         sys.exit(1)
     except Exception as e:
-        click.echo(f"Error: {e}", err=True)
+        click.echo(f'Error: {e}', err=True)
         sys.exit(1)
