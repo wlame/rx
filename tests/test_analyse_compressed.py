@@ -322,8 +322,9 @@ class TestAnalyseSeekableZstdIndex:
         pytest.importorskip('zstandard')
 
         # Create a test file with enough content
+        # Use newline='' for consistent LF line endings on all platforms
         text_file = tmp_path / 'test.txt'
-        with open(text_file, 'w') as f:
+        with open(text_file, 'w', newline='') as f:
             for i in range(1, 101):
                 f.write(f'Line {i}: content for line number {i}\n')
 

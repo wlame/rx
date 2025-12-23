@@ -283,8 +283,8 @@ class TestSamplesRangesSeekableZstd:
         txt_path = temp_dir / 'test.txt'
         zst_path = temp_dir / 'test.txt.zst'
 
-        # Write test content
-        with open(txt_path, 'w') as f:
+        # Write test content with explicit LF line endings for cross-platform consistency
+        with open(txt_path, 'w', newline='') as f:
             for i in range(1, num_lines + 1):
                 f.write(f'Line {i}: This is line number {i}\n')
 

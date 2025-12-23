@@ -785,7 +785,8 @@ class TestSamplesEndpointCompressedRanges:
         txt_path = os.path.join(temp_dir, 'test.txt')
         zst_path = os.path.join(temp_dir, 'test.txt.zst')
 
-        with open(txt_path, 'w') as f:
+        # Use newline='' for consistent LF line endings on all platforms
+        with open(txt_path, 'w', newline='') as f:
             for i in range(1, 101):
                 f.write(f'Line {i}: content for line number {i}\n')
 

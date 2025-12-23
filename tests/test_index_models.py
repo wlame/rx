@@ -501,7 +501,8 @@ class TestFileIndexJsonPersistence:
             '',  # 0 chars (empty)
             'Normal',  # 6 chars
         ]
-        with open(test_file, 'w') as f:
+        # Use newline='' to ensure LF line endings on all platforms
+        with open(test_file, 'w', newline='') as f:
             f.write('\n'.join(lines) + '\n')
 
         file_index = create_index_file(test_file, force=True)
