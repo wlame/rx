@@ -17,7 +17,7 @@ from datetime import datetime
 from time import time
 from typing import Any
 
-from rx import index, seekable_index, seekable_zstd
+from rx import seekable_index, seekable_zstd
 from rx.compression import decompress_to_file, detect_compression, is_compressed
 from rx.file_utils import MAX_SUBPROCESSES, FileTask, create_file_tasks, is_text_file
 
@@ -1571,11 +1571,14 @@ class FileAnalyzer:
 
     def _add_index_info(self, filepath: str, result: FileAnalysisState):
         """Add index information to analysis result."""
+        from rx.unified_index import get_index_path as get_unified_index_path
+        from rx.unified_index import load_index as load_unified_index
+
         try:
+            # Check for seekable zstd index first (for .zst files)
             if seekable_zstd.is_seekable_zstd(filepath):
-                # Check for seekable zstd index
                 index_path = seekable_index.get_index_path(filepath)
-                if os.path.exists(index_path):
+                if os.path.exists(str(index_path)):
                     result.has_index = True
                     result.index_path = str(index_path)
                     result.index_valid = seekable_index.is_index_valid(filepath)
@@ -1587,21 +1590,24 @@ class FileAnalyzer:
                                 result.index_checkpoint_count = len(index_data.frames)
                         except Exception as e:
                             logger.warning(f'Failed to load seekable index: {e}')
-            else:
-                # Check for regular file index
-                index_path = index.get_index_path(filepath)
-                if os.path.exists(str(index_path)):
-                    result.has_index = True
-                    result.index_path = str(index_path)
-                    result.index_valid = index.is_index_valid(filepath)
+                    return
 
-                    if result.index_valid:
-                        try:
-                            file_index = index.load_index(index_path)
-                            if file_index:
-                                result.index_checkpoint_count = len(file_index.line_index)
-                        except Exception as e:
-                            logger.warning(f'Failed to load index: {e}')
+            # Check for unified index
+            index_path = get_unified_index_path(filepath)
+            if os.path.exists(str(index_path)):
+                result.has_index = True
+                result.index_path = str(index_path)
+
+                try:
+                    unified_idx = load_unified_index(filepath)
+                    if unified_idx:
+                        result.index_valid = True
+                        result.index_checkpoint_count = len(unified_idx.line_index)
+                    else:
+                        result.index_valid = False
+                except Exception as e:
+                    logger.warning(f'Failed to load unified index: {e}')
+                    result.index_valid = False
         except Exception as e:
             logger.warning(f'Failed to add index info: {e}')
 
@@ -1652,27 +1658,26 @@ class FileAnalyzer:
                     logger.warning(f'Failed to remove temp file {temp_file}: {e}')
 
     def _try_load_from_cache(self, filepath: str, file_id: str) -> FileAnalysisState | None:
-        """Try to load analysis results from cached index.
+        """Try to load analysis results from cached unified index.
 
         Args:
             filepath: Path to the file
             file_id: File ID for the result
 
         Returns:
-            FileAnalysisState if valid cache exists, None otherwise
+            FileAnalysisState if valid cache exists with analysis, None otherwise
         """
         if not self.use_index_cache:
             return None
 
-        if not index.is_index_valid(filepath):
+        from rx.unified_index import load_index
+
+        unified_idx = load_index(filepath)
+        if unified_idx is None:
             return None
 
-        file_index = index.load_index(index.get_index_path(filepath))
-        if file_index is None:
-            return None
-
-        analysis = file_index.analysis
-        if analysis is None:
+        # Only use cache if analysis was performed
+        if not unified_idx.analysis_performed:
             return None
 
         logger.debug(f'Using cached analysis for {filepath}')
@@ -1683,35 +1688,42 @@ class FileAnalyzer:
             result = FileAnalysisState(
                 file_id=file_id,
                 filepath=filepath,
-                size_bytes=file_index.source_size_bytes or stat_info.st_size,
-                size_human=human_readable_size(file_index.source_size_bytes or stat_info.st_size),
+                size_bytes=unified_idx.source_size_bytes or stat_info.st_size,
+                size_human=human_readable_size(unified_idx.source_size_bytes or stat_info.st_size),
                 is_text=True,  # Index only exists for text files
             )
 
             # File metadata from stat
             result.created_at = datetime.fromtimestamp(stat_info.st_ctime).isoformat()
-            result.modified_at = file_index.source_modified_at
-            result.permissions = oct(stat_info.st_mode)[-3:]
+            result.modified_at = unified_idx.source_modified_at
+            result.permissions = unified_idx.permissions or oct(stat_info.st_mode)[-3:]
+            result.owner = unified_idx.owner
 
-            try:
-                import pwd
+            if result.owner is None:
+                try:
+                    import pwd
 
-                result.owner = pwd.getpwuid(stat_info.st_uid).pw_name
-            except (ImportError, KeyError):
-                result.owner = str(stat_info.st_uid)
+                    result.owner = pwd.getpwuid(stat_info.st_uid).pw_name
+                except (ImportError, KeyError):
+                    result.owner = str(stat_info.st_uid)
 
-            # Analysis data from cache
-            result.line_count = analysis.line_count
-            result.empty_line_count = analysis.empty_line_count
-            result.line_length_max = analysis.line_length_max
-            result.line_length_avg = analysis.line_length_avg
-            result.line_length_median = analysis.line_length_median
-            result.line_length_p95 = analysis.line_length_p95
-            result.line_length_p99 = analysis.line_length_p99
-            result.line_length_stddev = analysis.line_length_stddev
-            result.line_length_max_line_number = analysis.line_length_max_line_number
-            result.line_length_max_byte_offset = analysis.line_length_max_byte_offset
-            result.line_ending = analysis.line_ending
+            # Analysis data from unified index
+            result.line_count = unified_idx.line_count
+            result.empty_line_count = unified_idx.empty_line_count
+            result.line_length_max = unified_idx.line_length_max
+            result.line_length_avg = unified_idx.line_length_avg
+            result.line_length_median = unified_idx.line_length_median
+            result.line_length_p95 = unified_idx.line_length_p95
+            result.line_length_p99 = unified_idx.line_length_p99
+            result.line_length_stddev = unified_idx.line_length_stddev
+            result.line_length_max_line_number = unified_idx.line_length_max_line_number
+            result.line_length_max_byte_offset = unified_idx.line_length_max_byte_offset
+            result.line_ending = unified_idx.line_ending
+
+            # Anomaly data from unified index
+            if unified_idx.anomalies:
+                result.anomalies = unified_idx.anomalies
+                result.anomaly_summary = unified_idx.anomaly_summary
 
             return result
 
@@ -1822,10 +1834,6 @@ class FileAnalyzer:
             # STEP 6: Analyze content
             if result.is_text:
                 self._analyze_text_file(filepath, result)
-
-                # Create index for large files
-                if size_bytes >= index.get_large_file_threshold_bytes():
-                    self._create_index_for_result(filepath, result)
             elif result.is_compressed:
                 # NEW: Handle compressed files
                 self._analyze_compressed_file(filepath, result)
@@ -1860,18 +1868,6 @@ class FileAnalyzer:
                 size_human='0 B',
                 is_text=False,
             )
-
-    def _create_index_for_result(self, filepath: str, result: FileAnalysisState):
-        """Create an index file from analysis result.
-
-        This is called after analyzing large files to cache the results.
-        """
-        try:
-            logger.info(f'Creating index for large file: {filepath}')
-            # Use create_index_file which will build a full index with line offsets
-            index.create_index_file(filepath, force=True)
-        except Exception as e:
-            logger.warning(f'Failed to create index for {filepath}: {e}')
 
     def _analyze_text_file(self, filepath: str, result: FileAnalysisState):
         """Analyze text file content using streaming to avoid loading entire file in memory.
@@ -2156,6 +2152,149 @@ class FileAnalyzer:
 
         except Exception as e:
             logger.error(f'Failed to analyze text content of {filepath}: {e}')
+
+    def _analyze_very_large_file_fast(self, filepath: str, result: FileAnalysisState):
+        """Fast path for very large files (>1GB) using wc -l and rg prescan.
+
+        This avoids Python line iteration which is slow for multi-GB files.
+        Instead, it uses:
+        - `wc -l` for fast line counting
+        - `rg_prescan_all_detectors` for parallel anomaly detection
+
+        Line statistics (avg, median, percentiles) are not computed in fast path.
+
+        Args:
+            filepath: Path to the file to analyze
+            result: FileAnalysisState to populate with results
+        """
+        import subprocess
+
+        from rx.analyze.prescan import rg_prescan_all_detectors
+
+        try:
+            # Get line count using wc -l (very fast, even for huge files)
+            wc_result = subprocess.run(
+                ['wc', '-l', filepath],
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+            if wc_result.returncode == 0:
+                # Output format: "  12345 /path/to/file"
+                line_count_str = wc_result.stdout.strip().split()[0]
+                result.line_count = int(line_count_str)
+            else:
+                logger.warning(f'wc -l failed for {filepath}, line count unavailable')
+                result.line_count = None
+
+            # Detect line ending from first chunk
+            SAMPLE_SIZE = 10 * 1024 * 1024  # 10MB
+            with open(filepath, 'rb') as f:
+                sample = f.read(SAMPLE_SIZE)
+            result.line_ending = self._detect_line_ending(sample)
+
+            # Set placeholder values for line statistics (not computed in fast path)
+            result.empty_line_count = None
+            result.line_length_max = None
+            result.line_length_avg = None
+            result.line_length_median = None
+            result.line_length_p95 = None
+            result.line_length_p99 = None
+            result.line_length_stddev = None
+            result.line_length_max_line_number = None
+            result.line_length_max_byte_offset = None
+
+            # Run parallel prescan for anomaly detection
+            if self.detect_anomalies and self.anomaly_detectors:
+                matches_by_detector = rg_prescan_all_detectors(filepath, self.anomaly_detectors)
+
+                if matches_by_detector:
+                    # Convert prescan matches to AnomalyRange objects
+                    anomalies: list[AnomalyRange] = []
+
+                    for detector_name, matches in matches_by_detector.items():
+                        # Find the detector to get category info
+                        detector = None
+                        for d in self.anomaly_detectors:
+                            if d.name == detector_name:
+                                detector = d
+                                break
+
+                        if not detector:
+                            continue
+
+                        # Group adjacent matches into ranges
+                        if not matches:
+                            continue
+
+                        # Sort by line number
+                        sorted_matches = sorted(matches, key=lambda m: m.line_num)
+
+                        i = 0
+                        while i < len(sorted_matches):
+                            start_match = sorted_matches[i]
+                            end_match = start_match
+                            max_severity = start_match.severity
+                            lines_text = [start_match.line_text]
+
+                            # Merge adjacent lines (within 2 lines gap)
+                            j = i + 1
+                            while j < len(sorted_matches):
+                                next_match = sorted_matches[j]
+                                if next_match.line_num <= end_match.line_num + 2:
+                                    end_match = next_match
+                                    max_severity = max(max_severity, next_match.severity)
+                                    lines_text.append(next_match.line_text)
+                                    j += 1
+                                else:
+                                    break
+
+                            # Create description from first line
+                            description = lines_text[0][:200] if lines_text else ''
+
+                            anomalies.append(
+                                AnomalyRange(
+                                    start_line=start_match.line_num,
+                                    end_line=end_match.line_num,
+                                    start_offset=start_match.byte_offset,
+                                    end_offset=end_match.byte_offset,
+                                    severity=max_severity,
+                                    category=detector.category,
+                                    description=description,
+                                    detector=detector_name,
+                                )
+                            )
+
+                            i = j
+
+                    # Limit total anomalies
+                    if len(anomalies) > 10000:
+                        # Sort by severity and keep top 10k
+                        anomalies.sort(key=lambda a: a.severity, reverse=True)
+                        anomalies = anomalies[:10000]
+                        # Re-sort by line number
+                        anomalies.sort(key=lambda a: a.start_line)
+
+                    result.anomalies = anomalies
+
+                    # Build anomaly summary
+                    result.anomaly_summary = {}
+                    for anomaly in anomalies:
+                        category = anomaly.category
+                        result.anomaly_summary[category] = result.anomaly_summary.get(category, 0) + 1
+
+                    logger.info(f'Fast path analysis complete: {result.line_count:,} lines, {len(anomalies)} anomalies')
+                else:
+                    result.anomalies = []
+                    result.anomaly_summary = {}
+            else:
+                result.anomalies = []
+                result.anomaly_summary = {}
+
+        except Exception as e:
+            logger.error(f'Fast path analysis failed for {filepath}: {e}')
+            # Fall back to regular analysis
+            raise
 
     def _merge_and_filter_anomalies(
         self,
