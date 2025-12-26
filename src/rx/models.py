@@ -744,6 +744,23 @@ class TraceResponse(BaseModel):
         return '\n'.join(lines)
 
 
+class AnomalyRangeResult(BaseModel):
+    """Represents a detected anomaly in a file.
+
+    Anomalies are line ranges flagged by detectors as interesting or
+    potentially problematic (e.g., stack traces, errors, format issues).
+    """
+
+    start_line: int = Field(..., description='First line of anomaly (1-based)')
+    end_line: int = Field(..., description='Last line of anomaly (inclusive, 1-based)')
+    start_offset: int = Field(..., description='Byte offset of start')
+    end_offset: int = Field(..., description='Byte offset of end')
+    severity: float = Field(..., ge=0.0, le=1.0, description='Severity score (0.0 to 1.0, higher = more severe)')
+    category: str = Field(..., description="Anomaly category (e.g., 'traceback', 'error', 'format')")
+    description: str = Field(..., description='Human-readable description of the anomaly')
+    detector: str = Field(..., description='Name of detector that found the anomaly')
+
+
 class FileAnalysisResult(BaseModel):
     """Analysis result for a single file."""
 
@@ -785,6 +802,14 @@ class FileAnalysisResult(BaseModel):
     index_path: str | None = Field(None, description='Path to index file (if exists)')
     index_valid: bool = Field(default=False, description='Whether the index is valid (not stale)')
     index_checkpoint_count: int | None = Field(None, description='Number of checkpoints in index (if exists)')
+
+    # Anomaly detection results (only populated when detect_anomalies=True)
+    anomalies: list[AnomalyRangeResult] | None = Field(
+        None, description='Detected anomalies (only when detect_anomalies=True)'
+    )
+    anomaly_summary: dict[str, int] | None = Field(
+        None, description='Count of anomalies by category (only when detect_anomalies=True)'
+    )
 
 
 class AnalyseResponse(BaseModel):
@@ -884,6 +909,21 @@ class AnalyseResponse(BaseModel):
 
             if result.custom_metrics:
                 lines.append(f'  Custom metrics: {result.custom_metrics}')
+
+            # Anomaly detection results
+            if result.anomaly_summary:
+                RED = '\033[91m'
+                ORANGE = '\033[38;5;208m'
+                total_anomalies = sum(result.anomaly_summary.values())
+                if colorize:
+                    lines.append(f'  {RED}Anomalies: {total_anomalies} detected{RESET}')
+                else:
+                    lines.append(f'  Anomalies: {total_anomalies} detected')
+                for category, count in sorted(result.anomaly_summary.items()):
+                    if colorize:
+                        lines.append(f'    {ORANGE}{category}{RESET}: {count}')
+                    else:
+                        lines.append(f'    {category}: {count}')
 
             lines.append('')
 

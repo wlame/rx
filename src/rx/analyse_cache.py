@@ -112,7 +112,7 @@ def load_cache(file_path: str) -> dict | None:
     cache_path = get_cache_path(file_path)
 
     if not cache_path.exists():
-        logger.debug(f"No cache found for {file_path}")
+        logger.debug(f'No cache found for {file_path}')
         return None
 
     try:
@@ -123,14 +123,14 @@ def load_cache(file_path: str) -> dict | None:
 
         # Validate cache
         if not is_cache_valid(file_path, cache_data):
-            logger.debug(f"Cache invalid (file changed) for {file_path}")
+            logger.debug(f'Cache invalid (file changed) for {file_path}')
             return None
 
-        logger.info(f"Cache hit for {file_path}")
+        logger.info(f'Cache hit for {file_path}')
         return cache_data.analysis_result
 
     except (json.JSONDecodeError, ValueError, KeyError) as e:
-        logger.warning(f"Failed to load cache for {file_path}: {e}")
+        logger.warning(f'Failed to load cache for {file_path}: {e}')
         return None
 
 
@@ -157,14 +157,19 @@ def save_cache(file_path: str, analysis_result: dict) -> bool:
 
         cache_path = get_cache_path(file_path)
 
-        with open(cache_path, 'w') as f:
-            json.dump(cache_data.model_dump(), f, indent=2)
+        # Use compact JSON for large files (no indent) to reduce file size
+        anomaly_count = len(analysis_result.get('anomalies', []))
+        indent = None if anomaly_count > 1000 else 2
 
-        logger.info(f"Saved cache for {file_path}")
+        with open(cache_path, 'w') as f:
+            json.dump(cache_data.model_dump(), f, indent=indent)
+
+        cache_size = cache_path.stat().st_size
+        logger.info(f'Saved cache for {file_path} ({cache_size:,} bytes, {anomaly_count} anomalies)')
         return True
 
-    except OSError as e:
-        logger.warning(f"Failed to save cache for {file_path}: {e}")
+    except Exception as e:
+        logger.warning(f'Failed to save cache for {file_path}: {type(e).__name__}: {e}')
         return False
 
 
@@ -182,11 +187,11 @@ def delete_cache(file_path: str) -> bool:
     try:
         if cache_path.exists():
             cache_path.unlink()
-            logger.info(f"Deleted cache for {file_path}")
+            logger.info(f'Deleted cache for {file_path}')
             return True
         return False
     except OSError as e:
-        logger.warning(f"Failed to delete cache for {file_path}: {e}")
+        logger.warning(f'Failed to delete cache for {file_path}: {e}')
         return False
 
 
@@ -204,7 +209,7 @@ def clear_all_caches() -> int:
             cache_file.unlink()
             count += 1
         except OSError as e:
-            logger.warning(f"Failed to delete {cache_file}: {e}")
+            logger.warning(f'Failed to delete {cache_file}: {e}')
 
-    logger.info(f"Cleared {count} analyse cache files")
+    logger.info(f'Cleared {count} analyse cache files')
     return count

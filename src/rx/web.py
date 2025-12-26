@@ -667,6 +667,9 @@ async def analyse(
         ..., description='File or directory path(s) to analyze', examples=['/var/log/app.log']
     ),
     max_workers: int = Query(10, description='Maximum number of parallel workers', ge=1, le=50, examples=[10]),
+    detect_anomalies: bool = Query(
+        False, description='Detect anomalies in log files (tracebacks, errors, format deviations)'
+    ),
 ) -> dict:
     """
     Analyze files to extract metadata and statistics.
@@ -678,6 +681,12 @@ async def analyse(
 
     **Analysis is performed in parallel using multiple threads.**
 
+    With **detect_anomalies=true**, the endpoint also detects:
+    - Python/Java/JavaScript/Go/Rust stack traces
+    - Lines containing ERROR, FATAL, Exception keywords
+    - Unusually long lines (>3 standard deviations from mean)
+    - Unusual indentation blocks
+
     Returns:
     - **path**: Analyzed path(s)
     - **time**: Analysis time in seconds
@@ -685,6 +694,8 @@ async def analyse(
     - **results**: List of analysis results for each file
     - **scanned_files**: List of successfully scanned files
     - **skipped_files**: List of files that failed analysis
+    - **anomalies**: List of detected anomalies (when detect_anomalies=true)
+    - **anomaly_summary**: Count by category (when detect_anomalies=true)
 
     The plugin architecture allows easy extension with custom metrics.
     """
@@ -715,6 +726,7 @@ async def analyse(
                 analyse_path,
                 paths=paths,
                 max_workers=max_workers,
+                detect_anomalies=detect_anomalies,
             )
         )
         duration = time() - time_before

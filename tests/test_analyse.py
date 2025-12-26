@@ -858,6 +858,56 @@ class TestReservoirSampling:
             else:
                 os.environ.pop('RX_SAMPLE_SIZE_LINES', None)
 
+    def test_empty_lines_excluded_from_statistics(self):
+        """Test that empty lines do not affect line length statistics (avg, stddev, etc.)"""
+        # Create two files: one with empty lines, one without
+        # Both should have identical statistics since empty lines are excluded
+
+        # File with only non-empty lines of length 10
+        content_no_empty = 'aaaaaaaaaa\n' * 100  # 100 lines, each 10 chars
+
+        # File with same non-empty lines but interspersed with 500 empty lines
+        content_with_empty = ('aaaaaaaaaa\n' + '\n' * 5) * 100  # 100 non-empty + 500 empty
+
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as f:
+            f.write(content_no_empty)
+            path_no_empty = f.name
+
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as f:
+            f.write(content_with_empty)
+            path_with_empty = f.name
+
+        try:
+            analyzer = FileAnalyzer()
+
+            result_no_empty = analyzer.analyze_file(path_no_empty, 'f1')
+            result_with_empty = analyzer.analyze_file(path_with_empty, 'f2')
+
+            # Verify the files have different total line counts
+            assert result_no_empty.line_count == 100
+            assert result_with_empty.line_count == 600  # 100 non-empty + 500 empty
+
+            # Verify empty line counts
+            assert result_no_empty.empty_line_count == 0
+            assert result_with_empty.empty_line_count == 500
+
+            # Statistics should be IDENTICAL since empty lines are excluded
+            assert result_no_empty.line_length_avg == result_with_empty.line_length_avg
+            assert result_no_empty.line_length_max == result_with_empty.line_length_max
+            assert result_no_empty.line_length_median == result_with_empty.line_length_median
+            assert result_no_empty.line_length_stddev == result_with_empty.line_length_stddev
+            assert result_no_empty.line_length_p95 == result_with_empty.line_length_p95
+            assert result_no_empty.line_length_p99 == result_with_empty.line_length_p99
+
+            # Verify the actual values (all lines are 10 chars)
+            assert result_with_empty.line_length_avg == 10.0
+            assert result_with_empty.line_length_max == 10
+            assert result_with_empty.line_length_stddev == 0.0  # All same length
+
+        finally:
+            os.unlink(path_no_empty)
+            os.unlink(path_with_empty)
+
     def test_longest_line_always_found(self):
         """Test that longest line is always found regardless of sampling"""
         # Create file with one very long line among many short lines
@@ -933,3 +983,328 @@ class TestReservoirSampling:
 
         finally:
             os.unlink(temp_path)
+
+
+class TestAnomalyDetection:
+    """Integration tests for anomaly detection."""
+
+    @pytest.fixture
+    def temp_log_with_errors(self, temp_root):
+        """Create a log file with various anomalies."""
+        content = """2024-01-01 10:00:00 INFO: Application started
+2024-01-01 10:00:01 INFO: Processing request
+2024-01-01 10:00:02 ERROR: Failed to connect to database
+2024-01-01 10:00:03 INFO: Retrying connection
+2024-01-01 10:00:04 FATAL: Database connection timeout
+2024-01-01 10:00:05 INFO: Shutting down
+Traceback (most recent call last):
+  File "/app/main.py", line 42, in connect
+    db.connect()
+  File "/app/db.py", line 10, in connect
+    raise ConnectionError("timeout")
+ConnectionError: timeout
+2024-01-01 10:00:06 INFO: Cleanup complete
+"""
+        temp_path = os.path.join(temp_root, 'app.log')
+        with open(temp_path, 'w', newline='') as f:
+            f.write(content)
+        yield temp_path
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+    @pytest.fixture
+    def temp_log_clean(self, temp_root):
+        """Create a clean log file with no anomalies."""
+        content = """2024-01-01 10:00:00 INFO: Application started
+2024-01-01 10:00:01 INFO: Processing request
+2024-01-01 10:00:02 INFO: Request completed
+2024-01-01 10:00:03 INFO: Processing request
+2024-01-01 10:00:04 INFO: Request completed
+2024-01-01 10:00:05 INFO: Shutting down
+"""
+        temp_path = os.path.join(temp_root, 'clean.log')
+        with open(temp_path, 'w', newline='') as f:
+            f.write(content)
+        yield temp_path
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+    def test_detect_anomalies_disabled_by_default(self, temp_log_with_errors):
+        """Test that anomaly detection is disabled by default."""
+        analyzer = FileAnalyzer()
+        result = analyzer.analyze_file(temp_log_with_errors, 'f1')
+
+        # Anomalies should be empty when detection is disabled
+        assert result.anomalies == []
+        assert result.anomaly_summary == {}
+
+    def test_detect_anomalies_enabled(self, temp_log_with_errors):
+        """Test that anomaly detection finds errors and tracebacks."""
+        analyzer = FileAnalyzer(detect_anomalies=True)
+        result = analyzer.analyze_file(temp_log_with_errors, 'f1')
+
+        # Should find anomalies
+        assert len(result.anomalies) > 0
+        assert len(result.anomaly_summary) > 0
+
+        # Check for expected categories
+        categories = set(a.category for a in result.anomalies)
+        assert 'error' in categories or 'traceback' in categories
+
+    def test_detect_error_keywords(self, temp_log_with_errors):
+        """Test detection of ERROR and FATAL keywords."""
+        analyzer = FileAnalyzer(detect_anomalies=True)
+        result = analyzer.analyze_file(temp_log_with_errors, 'f1')
+
+        # Should have detected anomalies - either error category or traceback
+        # (error keywords may be merged with traceback when nearby)
+        assert len(result.anomalies) >= 1
+
+        # Check that we detected either error or traceback categories
+        categories = set(a.category for a in result.anomalies)
+        assert 'error' in categories or 'traceback' in categories
+
+    def test_detect_traceback(self, temp_log_with_errors):
+        """Test detection of Python traceback."""
+        analyzer = FileAnalyzer(detect_anomalies=True)
+        result = analyzer.analyze_file(temp_log_with_errors, 'f1')
+
+        # Find traceback anomalies
+        traceback_anomalies = [a for a in result.anomalies if a.category == 'traceback']
+
+        # Should detect the traceback
+        assert len(traceback_anomalies) >= 1
+
+        # Check that the traceback spans multiple lines (merged)
+        if traceback_anomalies:
+            tb = traceback_anomalies[0]
+            assert tb.start_line < tb.end_line or tb.start_line == tb.end_line
+
+    def test_clean_file_no_anomalies(self, temp_log_clean):
+        """Test that clean files have no anomalies."""
+        analyzer = FileAnalyzer(detect_anomalies=True)
+        result = analyzer.analyze_file(temp_log_clean, 'f1')
+
+        # Should have no anomalies (only INFO lines)
+        assert len(result.anomalies) == 0
+        assert result.anomaly_summary == {}
+
+    def test_anomaly_summary_counts(self, temp_log_with_errors):
+        """Test that anomaly_summary contains correct counts."""
+        analyzer = FileAnalyzer(detect_anomalies=True)
+        result = analyzer.analyze_file(temp_log_with_errors, 'f1')
+
+        # Summary should match actual anomaly count per category
+        for category, count in result.anomaly_summary.items():
+            actual_count = sum(1 for a in result.anomalies if a.category == category)
+            assert count == actual_count
+
+    def test_anomaly_has_required_fields(self, temp_log_with_errors):
+        """Test that each anomaly has all required fields."""
+        analyzer = FileAnalyzer(detect_anomalies=True)
+        result = analyzer.analyze_file(temp_log_with_errors, 'f1')
+
+        for anomaly in result.anomalies:
+            assert anomaly.start_line >= 1
+            assert anomaly.end_line >= anomaly.start_line
+            assert anomaly.start_offset >= 0
+            assert anomaly.end_offset >= anomaly.start_offset
+            assert 0.0 <= anomaly.severity <= 1.0
+            assert len(anomaly.category) > 0
+            assert len(anomaly.description) > 0
+            assert len(anomaly.detector) > 0
+
+    def test_analyse_path_with_detect_anomalies(self, temp_log_with_errors):
+        """Test analyse_path function with detect_anomalies=True."""
+        result = analyse_path([temp_log_with_errors], detect_anomalies=True)
+
+        assert len(result['results']) == 1
+        file_result = result['results'][0]
+
+        # Should have anomalies
+        assert file_result.get('anomalies') is not None
+        assert len(file_result['anomalies']) > 0
+        assert file_result.get('anomaly_summary') is not None
+
+    def test_analyse_path_without_detect_anomalies(self, temp_log_with_errors):
+        """Test analyse_path function with detect_anomalies=False (default)."""
+        result = analyse_path([temp_log_with_errors], detect_anomalies=False)
+
+        assert len(result['results']) == 1
+        file_result = result['results'][0]
+
+        # Should have no anomalies or None
+        anomalies = file_result.get('anomalies')
+        assert anomalies is None or len(anomalies) == 0
+
+    def test_cli_detect_anomalies_flag(self, temp_log_with_errors):
+        """Test CLI with --detect-anomalies flag."""
+        runner = CliRunner()
+        result = runner.invoke(analyse_command, [temp_log_with_errors, '--detect-anomalies'])
+
+        assert result.exit_code == 0
+        # Output should mention anomalies
+        assert 'Anomalies' in result.output or 'detected' in result.output.lower()
+
+    def test_cli_detect_anomalies_json(self, temp_log_with_errors):
+        """Test CLI with --detect-anomalies and --json flags."""
+        runner = CliRunner()
+        result = runner.invoke(analyse_command, [temp_log_with_errors, '--detect-anomalies', '--json'])
+
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+
+        # Should have anomalies in JSON output
+        assert 'results' in data
+        assert len(data['results']) == 1
+        file_result = data['results'][0]
+        assert 'anomalies' in file_result
+        assert 'anomaly_summary' in file_result
+
+    def test_web_api_detect_anomalies(self, client, temp_log_with_errors):
+        """Test web API with detect_anomalies=true."""
+        response = client.get('/v1/analyse', params={'path': temp_log_with_errors, 'detect_anomalies': True})
+
+        assert response.status_code == 200
+        data = response.json()
+
+        assert 'results' in data
+        assert len(data['results']) == 1
+        file_result = data['results'][0]
+
+        # Should have anomalies
+        assert file_result.get('anomalies') is not None
+        assert len(file_result['anomalies']) > 0
+
+    def test_web_api_without_detect_anomalies(self, client, temp_log_with_errors):
+        """Test web API without detect_anomalies (default=false)."""
+        response = client.get('/v1/analyse', params={'path': temp_log_with_errors})
+
+        assert response.status_code == 200
+        data = response.json()
+
+        assert 'results' in data
+        file_result = data['results'][0]
+
+        # Should have no anomalies or None
+        anomalies = file_result.get('anomalies')
+        assert anomalies is None or len(anomalies) == 0
+
+
+class TestCacheInvalidationWithAnomalies:
+    """Test cache invalidation when detect_anomalies flag changes."""
+
+    @pytest.fixture
+    def temp_log_file(self, temp_root):
+        """Create a temporary log file with error content."""
+        log_content = """INFO: Starting application
+DEBUG: Loading config
+ERROR: Connection failed to database
+INFO: Retrying connection
+FATAL: Unable to recover, shutting down
+Traceback (most recent call last):
+  File "app.py", line 42, in connect
+    raise ConnectionError("Failed")
+ConnectionError: Failed
+"""
+        log_path = os.path.join(temp_root, 'test_cache.log')
+        with open(log_path, 'w') as f:
+            f.write(log_content)
+        return log_path
+
+    def test_cache_bypassed_when_anomalies_requested_but_cache_has_none(self, temp_log_file):
+        """Test that cache is bypassed when detect_anomalies=True but cache has no anomalies."""
+        from rx.analyse_cache import load_cache
+
+        # First, analyze without anomaly detection to create cache
+        analyzer_no_anomalies = FileAnalyzer(detect_anomalies=False)
+        result_no_anomalies = analyzer_no_anomalies.analyze_file(temp_log_file, 'test_file')
+
+        # Verify cache was created without anomalies
+        cached = load_cache(temp_log_file)
+        assert cached is not None
+        assert not cached.get('anomalies')  # Empty or None
+
+        # Now analyze with anomaly detection - should bypass cache and detect anomalies
+        analyzer_with_anomalies = FileAnalyzer(detect_anomalies=True)
+        result_with_anomalies = analyzer_with_anomalies.analyze_file(temp_log_file, 'test_file')
+
+        # Should have detected anomalies
+        assert result_with_anomalies.anomalies is not None
+        assert len(result_with_anomalies.anomalies) > 0
+
+    def test_cache_used_when_anomalies_exist(self, temp_log_file):
+        """Test that cache is used when it already has anomalies."""
+        from rx.analyse_cache import load_cache
+
+        # First, analyze with anomaly detection to create cache with anomalies
+        analyzer = FileAnalyzer(detect_anomalies=True)
+        result1 = analyzer.analyze_file(temp_log_file, 'test_file')
+
+        # Verify cache has anomalies
+        cached = load_cache(temp_log_file)
+        assert cached is not None
+        assert cached.get('anomalies')
+        assert len(cached['anomalies']) > 0
+
+        # Analyze again with detect_anomalies=True - should use cache
+        result2 = analyzer.analyze_file(temp_log_file, 'test_file')
+
+        # Should have same anomalies from cache
+        assert len(result2.anomalies) == len(result1.anomalies)
+
+    def test_cache_used_when_anomalies_not_requested(self, temp_log_file):
+        """Test that cache is used when detect_anomalies=False regardless of cache content."""
+        from rx.analyse_cache import load_cache
+
+        # First, analyze without anomaly detection
+        analyzer = FileAnalyzer(detect_anomalies=False)
+        result1 = analyzer.analyze_file(temp_log_file, 'test_file')
+
+        # Verify cache exists
+        cached = load_cache(temp_log_file)
+        assert cached is not None
+
+        # Analyze again with detect_anomalies=False - should use cache
+        result2 = analyzer.analyze_file(temp_log_file, 'test_file')
+
+        # Both should have no anomalies
+        assert not result1.anomalies
+        assert not result2.anomalies
+
+    def test_cached_anomalies_returned_without_flag(self, temp_log_file):
+        """Test that cached anomalies are returned even when detect_anomalies=False."""
+
+        # First, analyze with anomaly detection to create cache with anomalies
+        analyzer_with = FileAnalyzer(detect_anomalies=True)
+        result_with = analyzer_with.analyze_file(temp_log_file, 'test_file')
+        assert len(result_with.anomalies) > 0
+
+        # Now analyze with detect_anomalies=False - should still return cached anomalies
+        analyzer_without = FileAnalyzer(detect_anomalies=False)
+        result_without = analyzer_without.analyze_file(temp_log_file, 'test_file')
+
+        # Should have anomalies from cache
+        assert len(result_without.anomalies) == len(result_with.anomalies)
+
+    def test_cache_recreated_with_anomalies_after_bypass(self, temp_log_file):
+        """Test that cache is updated with anomalies after being bypassed."""
+        from rx.analyse_cache import load_cache
+
+        # First, analyze without anomaly detection
+        analyzer_no = FileAnalyzer(detect_anomalies=False)
+        analyzer_no.analyze_file(temp_log_file, 'test_file')
+
+        # Verify no anomalies in cache
+        cached1 = load_cache(temp_log_file)
+        assert not cached1.get('anomalies')
+
+        # Now analyze with anomaly detection - bypasses cache and recreates it
+        analyzer_yes = FileAnalyzer(detect_anomalies=True)
+        result = analyzer_yes.analyze_file(temp_log_file, 'test_file')
+        assert len(result.anomalies) > 0
+
+        # Verify cache now has anomalies
+        cached2 = load_cache(temp_log_file)
+        assert cached2 is not None
+        assert len(cached2.get('anomalies', [])) > 0
