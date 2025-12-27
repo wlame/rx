@@ -2227,45 +2227,74 @@ class FileAnalyzer:
                         if not matches:
                             continue
 
-                        # Sort by line number
-                        sorted_matches = sorted(matches, key=lambda m: m.line_num)
+                        # Sort by byte_offset (more reliable than line_num which may be -1)
+                        sorted_matches = sorted(matches, key=lambda m: m.byte_offset)
 
-                        i = 0
-                        while i < len(sorted_matches):
-                            start_match = sorted_matches[i]
-                            end_match = start_match
-                            max_severity = start_match.severity
-                            lines_text = [start_match.line_text]
+                        # Get anomaly line limit from env var (default 1000)
+                        anomaly_line_limit = int(os.environ.get('RX_ANOMALY_LINE_LIMIT', '1000'))
 
-                            # Merge adjacent lines (within 2 lines gap)
-                            j = i + 1
-                            while j < len(sorted_matches):
-                                next_match = sorted_matches[j]
-                                if next_match.line_num <= end_match.line_num + 2:
-                                    end_match = next_match
-                                    max_severity = max(max_severity, next_match.severity)
-                                    lines_text.append(next_match.line_text)
-                                    j += 1
-                                else:
-                                    break
+                        # When line numbers are unknown (-1), don't merge matches
+                        # Each match becomes its own anomaly range
+                        has_line_numbers = all(m.line_num != -1 for m in sorted_matches)
 
-                            # Create description from first line
-                            description = lines_text[0][:200] if lines_text else ''
-
-                            anomalies.append(
-                                AnomalyRange(
-                                    start_line=start_match.line_num,
-                                    end_line=end_match.line_num,
-                                    start_offset=start_match.byte_offset,
-                                    end_offset=end_match.byte_offset,
-                                    severity=max_severity,
-                                    category=detector.category,
-                                    description=description,
-                                    detector=detector_name,
+                        if not has_line_numbers:
+                            # No merging when line numbers are unknown
+                            for match in sorted_matches:
+                                description = match.line_text[:200] if match.line_text else ''
+                                anomalies.append(
+                                    AnomalyRange(
+                                        start_line=match.line_num,
+                                        end_line=match.line_num,
+                                        start_offset=match.byte_offset,
+                                        end_offset=match.byte_offset,
+                                        severity=match.severity,
+                                        category=detector.category,
+                                        description=description,
+                                        detector=detector_name,
+                                    )
                                 )
-                            )
+                        else:
+                            # Merge adjacent lines (within 2 lines gap), but cap at anomaly_line_limit
+                            i = 0
+                            while i < len(sorted_matches):
+                                start_match = sorted_matches[i]
+                                end_match = start_match
+                                max_severity = start_match.severity
+                                lines_text = [start_match.line_text]
 
-                            i = j
+                                j = i + 1
+                                while j < len(sorted_matches):
+                                    next_match = sorted_matches[j]
+                                    # Check adjacency AND line limit
+                                    lines_in_range = next_match.line_num - start_match.line_num + 1
+                                    if (
+                                        next_match.line_num <= end_match.line_num + 2
+                                        and lines_in_range <= anomaly_line_limit
+                                    ):
+                                        end_match = next_match
+                                        max_severity = max(max_severity, next_match.severity)
+                                        lines_text.append(next_match.line_text)
+                                        j += 1
+                                    else:
+                                        break
+
+                                # Create description from first line
+                                description = lines_text[0][:200] if lines_text else ''
+
+                                anomalies.append(
+                                    AnomalyRange(
+                                        start_line=start_match.line_num,
+                                        end_line=end_match.line_num,
+                                        start_offset=start_match.byte_offset,
+                                        end_offset=end_match.byte_offset,
+                                        severity=max_severity,
+                                        category=detector.category,
+                                        description=description,
+                                        detector=detector_name,
+                                    )
+                                )
+
+                                i = j
 
                     # Limit total anomalies
                     if len(anomalies) > 10000:
@@ -2319,6 +2348,9 @@ class FileAnalyzer:
         if not raw_anomalies:
             return []
 
+        # Get anomaly line limit from env var (default 1000)
+        anomaly_line_limit = int(os.environ.get('RX_ANOMALY_LINE_LIMIT', '1000'))
+
         # Group by detector
         by_detector: dict[str, list[tuple[int, int, float, str]]] = {}
         for detector, line_num, byte_offset, severity, line_text in raw_anomalies:
@@ -2338,7 +2370,7 @@ class FileAnalyzer:
             # Sort by line number
             entries = sorted(by_detector[name], key=lambda x: x[0])
 
-            # Merge adjacent lines
+            # Merge adjacent lines, but cap at anomaly_line_limit
             i = 0
             while i < len(entries):
                 start_line, start_offset, max_severity, first_line = entries[i]
@@ -2349,8 +2381,9 @@ class FileAnalyzer:
                 j = i + 1
                 while j < len(entries):
                     next_line = entries[j][0]
-                    # Merge if adjacent (within 2 lines to allow for gaps)
-                    if next_line <= end_line + 2:
+                    # Check adjacency AND line limit
+                    range_size = next_line - start_line + 1
+                    if next_line <= end_line + 2 and range_size <= anomaly_line_limit:
                         end_line = next_line
                         max_severity = max(max_severity, entries[j][2])
                         lines_in_range.append(entries[j][3])
@@ -2426,6 +2459,9 @@ class FileAnalyzer:
         if not raw_anomalies:
             return []
 
+        # Get anomaly line limit from env var (default 1000)
+        anomaly_line_limit = int(os.environ.get('RX_ANOMALY_LINE_LIMIT', '1000'))
+
         # Group by detector name
         by_detector: dict[str, list[tuple[int, int, float, str]]] = {}
         for detector_name, line_num, byte_offset, severity, line_text in raw_anomalies:
@@ -2444,7 +2480,7 @@ class FileAnalyzer:
             # Sort by line number
             entries = sorted(entries, key=lambda x: x[0])
 
-            # Merge adjacent lines
+            # Merge adjacent lines, but cap at anomaly_line_limit
             i = 0
             while i < len(entries):
                 start_line, start_offset, max_severity, first_line = entries[i]
@@ -2455,8 +2491,9 @@ class FileAnalyzer:
                 j = i + 1
                 while j < len(entries):
                     next_line = entries[j][0]
-                    # Merge if adjacent (within 2 lines to allow for gaps)
-                    if next_line <= end_line + 2:
+                    # Check adjacency AND line limit
+                    range_size = next_line - start_line + 1
+                    if next_line <= end_line + 2 and range_size <= anomaly_line_limit:
                         end_line = next_line
                         max_severity = max(max_severity, entries[j][2])
                         lines_in_range.append(entries[j][3])

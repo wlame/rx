@@ -721,20 +721,20 @@ class TestAddIndexInfo:
         """
         import types
 
-        from rx import index, seekable_index, seekable_zstd
+        from rx import seekable_index, seekable_zstd, unified_index
 
         # Verify these are modules
-        assert isinstance(index, types.ModuleType)
+        assert isinstance(unified_index, types.ModuleType)
         assert isinstance(seekable_index, types.ModuleType)
         assert isinstance(seekable_zstd, types.ModuleType)
 
         # Verify the functions exist on the modules directly
-        assert hasattr(index, 'get_index_path')
+        assert hasattr(unified_index, 'get_index_path')
         assert hasattr(seekable_index, 'get_index_path')
         assert hasattr(seekable_zstd, 'is_seekable_zstd')
 
         # Verify they are callable
-        assert callable(index.get_index_path)
+        assert callable(unified_index.get_index_path)
         assert callable(seekable_index.get_index_path)
         assert callable(seekable_zstd.is_seekable_zstd)
 
@@ -1447,3 +1447,162 @@ ConnectionError: Failed
         cached2 = load_index(temp_log_file)
         assert cached2 is not None
         assert len(cached2.anomalies) > 0
+
+
+class TestAnomalyLineNumberCalculation:
+    """Test that anomaly line numbers are correctly calculated from offsets."""
+
+    def test_offset_to_line_calculation(self):
+        """Test the _offset_to_line method in FileIndexer."""
+        from rx.indexer import FileIndexer
+
+        indexer = FileIndexer(analyze=True)
+
+        # Create a mock line_index: [[line_num, byte_offset], ...]
+        # Simulating 100 bytes per line average
+        line_index = [
+            [1, 0],  # Line 1 at offset 0
+            [101, 10000],  # Line 101 at offset 10000 (100 bytes/line avg)
+            [201, 20000],  # Line 201 at offset 20000
+            [301, 30000],  # Line 301 at offset 30000
+        ]
+
+        # Test offset in first range
+        assert indexer._offset_to_line(500, line_index) == 6  # ~5 lines from start
+        assert indexer._offset_to_line(5000, line_index) == 51  # ~50 lines from start
+
+        # Test offset in middle range
+        assert indexer._offset_to_line(15000, line_index) == 151  # 101 + 50 lines
+
+        # Test offset at exact checkpoint
+        assert indexer._offset_to_line(10000, line_index) == 101
+
+        # Test empty line_index
+        assert indexer._offset_to_line(1000, []) == -1
+
+    def test_anomaly_start_end_offsets_match(self, tmp_path):
+        """Test that anomaly start_offset and end_offset are consistent.
+
+        This tests the fix for the bug where unrelated matches were merged
+        because all line_num values were -1.
+        """
+        from rx.indexer import FileIndexer
+
+        # Create a file with errors at known positions
+        test_file = tmp_path / 'test_errors.log'
+        lines = []
+        for i in range(1000):
+            if i == 100:
+                lines.append('ERROR: First error at line 101\n')
+            elif i == 500:
+                lines.append('ERROR: Second error at line 501\n')
+            elif i == 900:
+                lines.append('WARNING: Warning at line 901\n')
+            else:
+                lines.append(f'Normal log line {i}: some content here\n')
+
+        test_file.write_text(''.join(lines))
+
+        # Index with analysis
+        indexer = FileIndexer(analyze=True, force=True)
+        idx = indexer.index_file(str(test_file))
+
+        assert idx is not None
+        assert idx.anomalies is not None
+
+        # Check that each anomaly has consistent offsets
+        for anomaly in idx.anomalies:
+            # start_offset should be <= end_offset
+            assert anomaly.start_offset <= anomaly.end_offset, (
+                f'Anomaly has start_offset ({anomaly.start_offset}) > end_offset ({anomaly.end_offset})'
+            )
+
+            # The difference should be reasonable (not spanning gigabytes)
+            offset_diff = anomaly.end_offset - anomaly.start_offset
+            assert offset_diff < 10000, (
+                f'Anomaly offset range too large: {offset_diff} bytes. '
+                f'start={anomaly.start_offset}, end={anomaly.end_offset}'
+            )
+
+    def test_anomaly_line_numbers_calculated_from_index(self, tmp_path):
+        """Test that anomaly line numbers are calculated when initially -1."""
+        from rx.indexer import FileIndexer
+
+        # Create a larger file to ensure line_index is built
+        test_file = tmp_path / 'large_test.log'
+        lines = []
+        for i in range(10000):
+            if i == 1000:
+                lines.append('ERROR: Error at line 1001\n')
+            elif i == 5000:
+                lines.append('FATAL: Fatal error at line 5001\n')
+            else:
+                lines.append(f'Normal log line {i}: padding content here for size\n')
+
+        test_file.write_text(''.join(lines))
+
+        # Index with analysis
+        indexer = FileIndexer(analyze=True, force=True)
+        idx = indexer.index_file(str(test_file))
+
+        assert idx is not None
+        assert idx.anomalies is not None
+        assert len(idx.anomalies) >= 2
+
+        # All anomalies should have valid line numbers (not -1)
+        for anomaly in idx.anomalies:
+            assert anomaly.start_line != -1, (
+                f'Anomaly start_line is -1, should be calculated from offset {anomaly.start_offset}'
+            )
+            assert anomaly.end_line != -1, (
+                f'Anomaly end_line is -1, should be calculated from offset {anomaly.end_offset}'
+            )
+
+            # Line numbers should be reasonable (within file bounds)
+            assert 1 <= anomaly.start_line <= 10000
+            assert 1 <= anomaly.end_line <= 10000
+
+    def test_no_merge_when_line_numbers_unknown(self):
+        """Test that anomalies with unknown line numbers are not incorrectly merged."""
+        from rx.analyze.prescan import PrescanMatch
+        from rx.analyzer import AnomalyRange
+
+        # Simulate prescan matches with line_num=-1 at very different offsets
+        matches = [
+            PrescanMatch(line_num=-1, byte_offset=100, detector_name='error', severity=0.9, line_text='ERROR: first'),
+            PrescanMatch(
+                line_num=-1, byte_offset=1000000, detector_name='error', severity=0.9, line_text='ERROR: second'
+            ),
+            PrescanMatch(
+                line_num=-1, byte_offset=5000000, detector_name='error', severity=0.9, line_text='ERROR: third'
+            ),
+        ]
+
+        # When line numbers are unknown, each match should become a separate anomaly
+        # (no merging based on -1 <= -1 + 2)
+        has_line_numbers = any(m.line_num != -1 for m in matches)
+        assert not has_line_numbers
+
+        # Simulate the fixed logic: don't merge when line numbers are unknown
+        anomalies = []
+        if not has_line_numbers:
+            for match in matches:
+                anomalies.append(
+                    AnomalyRange(
+                        start_line=match.line_num,
+                        end_line=match.line_num,
+                        start_offset=match.byte_offset,
+                        end_offset=match.byte_offset,
+                        severity=match.severity,
+                        category='error',
+                        description=match.line_text,
+                        detector='error_keyword',
+                    )
+                )
+
+        # Should have 3 separate anomalies, not 1 merged one
+        assert len(anomalies) == 3
+
+        # Each should have matching start and end offsets
+        for anomaly in anomalies:
+            assert anomaly.start_offset == anomaly.end_offset

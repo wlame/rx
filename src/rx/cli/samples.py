@@ -8,18 +8,15 @@ import click
 from rx.compressed_index import get_decompressed_content_at_line, get_or_build_compressed_index
 from rx.compression import CompressionFormat, detect_compression, is_compressed
 from rx.file_utils import get_context, get_context_by_lines, is_text_file
-from rx.index import (
+from rx.models import SamplesResponse, UnifiedFileIndex
+from rx.unified_index import (
     LineInfo,
     calculate_exact_line_for_offset,
     calculate_exact_offset_for_line,
     calculate_line_info_for_offsets,
-    create_index_file,
-    get_index_path,
-    is_index_valid,
+    get_large_file_threshold_bytes,
     load_index,
 )
-from rx.models import SamplesResponse
-from rx.unified_index import load_index as load_unified_index
 
 
 def parse_offset_or_range(value: str) -> tuple[int, int | None]:
@@ -107,7 +104,7 @@ def get_lines_for_byte_range(path: str, start_offset: int, end_offset: int, inde
     return result
 
 
-def get_line_range(path: str, start_line: int, end_line: int, file_index: 'FileIndex | None' = None) -> list[str]:
+def get_line_range(path: str, start_line: int, end_line: int, file_index: UnifiedFileIndex | None = None) -> list[str]:
     """Get lines from start_line to end_line (inclusive, 1-based).
 
     Uses the index to seek directly to the start line's byte offset for efficiency.
@@ -117,7 +114,7 @@ def get_line_range(path: str, start_line: int, end_line: int, file_index: 'FileI
         path: File path
         start_line: Starting line number (1-based)
         end_line: Ending line number (1-based, inclusive)
-        file_index: Optional pre-loaded FileIndex for efficient seeking
+        file_index: Optional pre-loaded UnifiedFileIndex for efficient seeking
 
     Returns:
         List of lines in the range
@@ -169,10 +166,10 @@ def get_total_line_count(path: str) -> int:
     """Get total line count for a file using cached data or by counting.
 
     Strategy:
-    1. Try to get from analysis cache (fastest, most accurate)
-    2. Try to get from index cache + counting remaining lines
-    3. For large files: build index first, then use strategy 2
-    4. For small files: run analysis, then use strategy 1
+    1. Try to get from unified index cache (fastest, most accurate)
+    2. Use index + counting remaining lines if line_count not available
+    3. For large files without index: build index first
+    4. For small files: run indexer with analysis
     5. Fallback: count all lines directly
 
     Args:
@@ -183,45 +180,40 @@ def get_total_line_count(path: str) -> int:
     """
     import os
 
-    from rx.index import get_large_file_threshold_bytes
     from rx.indexer import FileIndexer
 
     # Strategy 1: Try unified index cache first
-    unified_idx = load_unified_index(path)
+    unified_idx = load_index(path)
     if unified_idx and unified_idx.line_count:
         return unified_idx.line_count
 
-    # Strategy 2: Try old index cache
-    if is_index_valid(path):
-        index_path = get_index_path(path)
-        file_index = load_index(index_path)
-        if file_index and file_index.line_index:
-            line_index = file_index.line_index
-            # Get the last indexed line number and offset
-            last_line, last_offset = line_index[-1]
+    # Strategy 2: Use index + count remaining if line_count not available
+    if unified_idx and unified_idx.line_index:
+        line_index = unified_idx.line_index
+        # Get the last indexed line number and offset
+        last_line, last_offset = line_index[-1]
 
-            # Count remaining lines after the last indexed position
-            remaining_lines = 0
-            with open(path, 'rb') as f:
-                f.seek(last_offset)
-                # Read from last indexed position to end
-                for _ in f:
-                    remaining_lines += 1
+        # Count remaining lines after the last indexed position
+        remaining_lines = 0
+        with open(path, 'rb') as f:
+            f.seek(last_offset)
+            # Read from last indexed position to end
+            for _ in f:
+                remaining_lines += 1
 
-            # Total = last indexed line + remaining lines - 1
-            # (subtract 1 because last_line is already counted)
-            return last_line + remaining_lines - 1
+        # Total = last indexed line + remaining lines - 1
+        # (subtract 1 because last_line is already counted)
+        return last_line + remaining_lines - 1
 
     # Strategy 3: Build index for file
     file_size = os.path.getsize(path)
     large_file_threshold = get_large_file_threshold_bytes()
 
     if file_size >= large_file_threshold:
-        # Large file: build index
+        # Large file: build index without analysis
         click.echo('Building index for large file...', err=True)
-        create_index_file(path)
-        # Now retry with index
-        file_index = load_index(get_index_path(path))
+        indexer = FileIndexer(analyze=False, force=False)
+        file_index = indexer.index_file(path)
         if file_index and file_index.line_index:
             line_index = file_index.line_index
             last_line, last_offset = line_index[-1]
@@ -232,7 +224,7 @@ def get_total_line_count(path: str) -> int:
                     remaining_lines += 1
             return last_line + remaining_lines - 1
     else:
-        # Small file: run indexer with analysis
+        # Small file: run indexer with analysis to get line_count
         click.echo('Indexing file...', err=True)
         indexer = FileIndexer(analyze=True)
         result = indexer.index_file(path)
@@ -540,7 +532,7 @@ def samples_command(
             # Byte offset mode - handle both single offsets and ranges
             import os
 
-            index_data = load_index(get_index_path(path))
+            index_data = load_index(path)
             context_data = {}
             offset_to_line = {}
 
@@ -580,7 +572,7 @@ def samples_command(
             )
         else:
             # Line offset mode - handle both single lines and ranges
-            index_data = load_index(get_index_path(path))
+            index_data = load_index(path)
             context_data = {}
             line_to_offset = {}
 

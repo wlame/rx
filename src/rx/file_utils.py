@@ -753,12 +753,10 @@ def get_context_by_lines(
     Raises:
         ValueError: If file doesn't exist or parameters are invalid
     """
-    from rx.index import (
-        create_index_file,
+    from rx.indexer import FileIndexer
+    from rx.unified_index import (
         find_line_offset,
-        get_index_path,
         get_large_file_threshold_bytes,
-        is_index_valid,
         load_index,
     )
 
@@ -776,14 +774,13 @@ def get_context_by_lines(
     if file_size < threshold or not use_index:
         return _get_context_by_lines_simple(filename, line_numbers, before_context, after_context)
 
-    # For large files, use index
-    index_path = get_index_path(filename)
-    if is_index_valid(filename):
-        file_index = load_index(index_path)
-    else:
+    # For large files, use unified index
+    file_index = load_index(filename)
+    if file_index is None:
         # Create index if it doesn't exist
         logger.info(f'Creating index for large file: {filename}')
-        file_index = create_index_file(filename)
+        indexer = FileIndexer(analyze=False, force=False)
+        file_index = indexer.index_file(filename)
 
     if file_index is None:
         # Fall back to simple method if index creation failed
@@ -791,7 +788,7 @@ def get_context_by_lines(
         return _get_context_by_lines_simple(filename, line_numbers, before_context, after_context)
 
     line_index = file_index.line_index if file_index.line_index else [[1, 0]]
-    total_lines = file_index.analysis.line_count if file_index.analysis else 0
+    total_lines = file_index.line_count if file_index.line_count else 0
 
     max_line_length = LINE_SIZE_ASSUMPTION_KB * 1024
 
@@ -811,7 +808,7 @@ def get_context_by_lines(
         lines_to_read = before_context + 1 + after_context + lines_to_skip
 
         # Use average line length from analysis if available, with safety margin
-        avg_line_length = file_index.analysis.line_length_avg if file_index.analysis else 100
+        avg_line_length = file_index.line_length_avg if file_index.line_length_avg else 100
 
         # Use a reasonable multiplier on average (4x) rather than adding max line length
         # This handles normal variability without exploding memory for files with outlier long lines

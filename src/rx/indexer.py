@@ -14,14 +14,54 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from time import time
 
-from rx import index as line_index
 from rx import seekable_index, seekable_zstd
 from rx.analyze import default_detectors
-from rx.compression import detect_compression, is_compressed
+from rx.compression import detect_compression, is_compound_archive, is_compressed
 from rx.file_utils import is_text_file
-from rx.index import get_index_step_bytes
 from rx.models import AnomalyRangeResult, FileType, FrameLineInfo, UnifiedFileIndex
+
+
+def is_indexable_file(filepath: str) -> bool:
+    """Check if a file can be indexed (text or compressed text).
+
+    We only index:
+    - Plain text files (logs, source code, etc.)
+    - Compressed text files (.gz, .zst, .xz, .bz2 containing text)
+
+    We skip:
+    - Binary files (images, videos, audio, executables, etc.)
+    - Compound archives (.tar.gz, .tar.xz, etc.) that contain multiple files
+    - Archives (zip, rar, 7z, etc.) that require extraction
+
+    Args:
+        filepath: Path to the file to check
+
+    Returns:
+        True if file can be indexed, False otherwise
+    """
+    # Skip compound archives like .tar.gz
+    if is_compound_archive(filepath):
+        return False
+
+    # Seekable zstd files are indexable
+    if seekable_zstd.is_seekable_zstd(filepath):
+        return True
+
+    # Other compressed files (gzip, xz, bz2) are indexable
+    if is_compressed(filepath):
+        return True
+
+    # Plain text files are indexable
+    if is_text_file(filepath):
+        return True
+
+    # Everything else (binary) is not indexable
+    return False
+
+
 from rx.unified_index import (
+    build_index,
+    get_index_step_bytes,
     load_index,
     needs_rebuild,
     save_index,
@@ -81,6 +121,11 @@ class FileIndexer:
 
         if not os.path.isfile(filepath):
             logger.warning(f'Not a file: {filepath}')
+            return None
+
+        # Check if file is indexable (text or compressed text)
+        if not is_indexable_file(filepath):
+            logger.debug(f'Skipping non-indexable file (binary/archive): {filepath}')
             return None
 
         try:
@@ -249,7 +294,7 @@ class FileIndexer:
         """
         # Use existing line_index module for line offset mapping
         try:
-            build_result = line_index.build_index(filepath)
+            build_result = build_index(filepath)
             if build_result:
                 idx.line_index = build_result.line_index
                 idx.index_step_bytes = get_index_step_bytes()
@@ -363,22 +408,79 @@ class FileIndexer:
 
             result = analyzer.analyze_file(filepath, 'f1')
 
-            # Copy anomalies to unified index
+            # Copy anomalies to unified index, fixing line numbers from offsets
             if result.anomalies:
-                idx.anomalies = [
-                    AnomalyRangeResult(
-                        start_line=a.start_line,
-                        end_line=a.end_line,
-                        start_offset=a.start_offset,
-                        end_offset=a.end_offset,
-                        severity=a.severity,
-                        category=a.category,
-                        description=a.description,
-                        detector=a.detector,
+                idx.anomalies = []
+                for a in result.anomalies:
+                    start_line = a.start_line
+                    end_line = a.end_line
+
+                    # If line numbers are unknown (-1), calculate from offsets using line_index
+                    if start_line == -1 and idx.line_index:
+                        start_line = self._offset_to_line(a.start_offset, idx.line_index)
+                    if end_line == -1 and idx.line_index:
+                        end_line = self._offset_to_line(a.end_offset, idx.line_index)
+
+                    idx.anomalies.append(
+                        AnomalyRangeResult(
+                            start_line=start_line,
+                            end_line=end_line,
+                            start_offset=a.start_offset,
+                            end_offset=a.end_offset,
+                            severity=a.severity,
+                            category=a.category,
+                            description=a.description,
+                            detector=a.detector,
+                        )
                     )
-                    for a in result.anomalies
-                ]
                 idx.anomaly_summary = result.anomaly_summary
 
         except Exception as e:
             logger.warning(f'Anomaly detection failed for {filepath}: {e}')
+
+    def _offset_to_line(self, offset: int, line_index: list[list[int]]) -> int:
+        """Convert byte offset to line number using binary search on line_index.
+
+        Args:
+            offset: Byte offset in the file
+            line_index: List of [line_number, byte_offset] entries
+
+        Returns:
+            Approximate line number (1-based), or -1 if cannot be determined
+        """
+        if not line_index:
+            return -1
+
+        # Binary search for the checkpoint at or before this offset
+        left, right = 0, len(line_index) - 1
+        result_idx = 0
+
+        while left <= right:
+            mid = (left + right) // 2
+            checkpoint_offset = line_index[mid][1]
+
+            if checkpoint_offset <= offset:
+                result_idx = mid
+                left = mid + 1
+            else:
+                right = mid - 1
+
+        # Get the checkpoint line number and offset
+        checkpoint_line = line_index[result_idx][0]
+        checkpoint_offset = line_index[result_idx][1]
+
+        # Estimate additional lines based on average line length
+        # Use next checkpoint to calculate average if available
+        if result_idx + 1 < len(line_index):
+            next_line = line_index[result_idx + 1][0]
+            next_offset = line_index[result_idx + 1][1]
+            lines_in_range = next_line - checkpoint_line
+            bytes_in_range = next_offset - checkpoint_offset
+            if bytes_in_range > 0 and lines_in_range > 0:
+                avg_line_length = bytes_in_range / lines_in_range
+                extra_bytes = offset - checkpoint_offset
+                extra_lines = int(extra_bytes / avg_line_length)
+                return checkpoint_line + extra_lines
+
+        # Fallback: just return the checkpoint line
+        return checkpoint_line

@@ -56,13 +56,13 @@ class TestIndexCacheDir:
     """Test that index module respects RX_CACHE_DIR."""
 
     def test_index_cache_dir_uses_rx_cache_dir(self, monkeypatch):
-        """Test that index.get_cache_dir uses RX_CACHE_DIR."""
+        """Test that unified_index.get_index_cache_dir uses RX_CACHE_DIR."""
         with tempfile.TemporaryDirectory() as tmpdir:
             monkeypatch.setenv('RX_CACHE_DIR', tmpdir)
 
-            from rx.index import get_cache_dir
+            from rx.unified_index import get_index_cache_dir
 
-            result = get_cache_dir()
+            result = get_index_cache_dir()
             assert str(result).startswith(tmpdir)
             assert 'indexes' in str(result)
 

@@ -18,13 +18,6 @@ from datetime import datetime
 from rx.cli import prometheus as prom
 from rx.compression import CompressionFormat, detect_compression, get_decompressor_command, is_compressed
 from rx.file_utils import MAX_SUBPROCESSES, FileTask, create_file_tasks, scan_directory_for_text_files, validate_file
-from rx.index import (
-    calculate_lines_for_offsets_batch,
-    get_index_path,
-    get_large_file_threshold_bytes,
-    is_index_valid,
-    load_index,
-)
 from rx.models import ContextLine, FileScannedPayload, MatchFoundPayload, ParseResult, Submatch
 from rx.rg_json import RgContextEvent, RgMatchEvent, parse_rg_json_event
 from rx.seekable_index import get_or_build_index
@@ -39,6 +32,11 @@ from rx.trace_cache import (
     save_trace_cache,
     should_cache_compressed_file,
     should_cache_file,
+)
+from rx.unified_index import (
+    calculate_lines_for_offsets_batch,
+    get_large_file_threshold_bytes,
+    load_index,
 )
 from rx.utils import NEWLINE_SYMBOL
 
@@ -1767,10 +1765,8 @@ def parse_multiple_files_multipattern(
         if is_compressed(filepath):
             continue
 
-        # Try to load index
-        index_data = None
-        if is_index_valid(filepath):
-            index_data = load_index(get_index_path(filepath))
+        # Try to load unified index
+        index_data = load_index(filepath)
 
         # Calculate all line numbers in a single file pass
         offset_to_line = calculate_lines_for_offsets_batch(filepath, offsets_to_resolve, index_data)

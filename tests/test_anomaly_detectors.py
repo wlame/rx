@@ -649,7 +649,10 @@ class TestHighEntropyDetector:
         assert severity >= 0.6  # Severity for secret context pattern
 
     def test_bearer_token(self):
-        ctx = make_context('Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0')
+        # Full JWT token format (three parts separated by dots)
+        ctx = make_context(
+            'Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c'
+        )
         severity = self.detector.check_line(ctx)
         assert severity is not None
         assert severity >= 0.6
@@ -674,8 +677,23 @@ class TestHighEntropyDetector:
         assert severity is None
 
     def test_base64_string(self):
-        # Long base64 string
+        # Long base64 string - without secret context, base64 alone is not flagged
+        # to reduce false positives (e.g. encoded images, data URLs)
         ctx = make_context('data: SGVsbG9Xb3JsZFRoaXNJc0FMb25nQmFzZTY0U3RyaW5nVGhhdFNob3VsZEJlRGV0ZWN0ZWQ=')
+        severity = self.detector.check_line(ctx)
+        # Without secret context keywords, not detected (reduces false positives)
+        assert severity is None
+
+    def test_sha256_hash(self):
+        # SHA256 hex hash - 64 hex characters
+        ctx = make_context('checksum: a1b2c3d4e5f6789012345678901234567890abcdefabcdefabcdefabcdef1234')
+        severity = self.detector.check_line(ctx)
+        assert severity is not None
+        assert severity >= 0.5
+
+    def test_aws_access_key(self):
+        # AWS access key pattern
+        ctx = make_context('AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE')
         severity = self.detector.check_line(ctx)
         assert severity is not None
 
@@ -712,29 +730,54 @@ class TestJsonDumpDetector:
         assert self.detector.name == 'json_dump'
         assert self.detector.category == 'format'
 
-    def test_json_object_at_start(self):
+    def test_json_object_single_line_not_flagged(self):
+        # Single-line JSON is no longer flagged (need multiline context)
         ctx = make_context('{"user": "john", "action": "login", "timestamp": "2024-01-15T10:30:45"}')
         severity = self.detector.check_line(ctx)
+        # Without multiline context (10+ JSON-like lines), not detected
+        assert severity is None
+
+    def test_json_object_with_multiline_context(self):
+        # Create a window with 10+ JSON-like lines to simulate multiline JSON
+        from collections import deque
+
+        window = deque(maxlen=20)
+        for i in range(12):
+            window.append(f'  "field{i}": "value{i}",')
+
+        ctx = LineContext(
+            line='{"user": "john", "action": "login", "timestamp": "2024-01-15T10:30:45", "extra": "data"}' + 'x' * 50,
+            line_number=15,
+            byte_offset=1500,
+            window=window,
+            line_lengths=deque([80] * 10),
+            avg_line_length=80.0,
+            stddev_line_length=5.0,
+        )
+        severity = self.detector.check_line(ctx)
+        # With multiline context, should be detected
         assert severity is not None
         assert severity >= 0.3
 
-    def test_json_object_as_value(self):
+    def test_json_object_as_value_single_line_not_flagged(self):
+        # Single-line JSON values are not flagged without multiline context
         ctx = make_context('response: {"status": "ok", "data": {"id": 123, "name": "test"}}')
         severity = self.detector.check_line(ctx)
-        assert severity is not None
+        assert severity is None
 
-    def test_json_array_at_start(self):
+    def test_json_array_single_line_not_flagged(self):
+        # Single-line arrays are not flagged without multiline context
         ctx = make_context('[{"id": 1, "name": "first"}, {"id": 2, "name": "second"}]')
         severity = self.detector.check_line(ctx)
-        assert severity is not None
+        assert severity is None
 
-    def test_long_json_higher_severity(self):
-        # Create a long JSON string
+    def test_long_json_still_needs_multiline_context(self):
+        # Even long JSON needs multiline context
         long_json = '{"data": "' + 'x' * 600 + '"}'
         ctx = make_context(long_json)
         severity = self.detector.check_line(ctx)
-        assert severity is not None
-        assert severity >= 0.4  # Higher severity for longer JSON
+        # Without multiline context, not detected
+        assert severity is None
 
     def test_short_line_not_flagged(self):
         ctx = make_context('{"a": 1}')  # Too short

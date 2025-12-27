@@ -225,7 +225,7 @@ class TestIndexInfo:
         text_file.write_text(test_content)
 
         # Analyze (should create index)
-        from rx.index import get_large_file_threshold_bytes
+        from rx.unified_index import get_large_file_threshold_bytes
 
         # Only test if file is large enough
         if text_file.stat().st_size < get_large_file_threshold_bytes():

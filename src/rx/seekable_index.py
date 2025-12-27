@@ -320,7 +320,7 @@ def build_index(
 
         # Add sampled line index entries for this frame
         # Store entry for first line of frame
-        line_index.append((first_line, frame.decompressed_offset, frame.index))
+        line_index.append([first_line, frame.decompressed_offset, frame.index])
 
         # Add intermediate entries at LINE_INDEX_INTERVAL
         if lines_in_frame > LINE_INDEX_INTERVAL:
@@ -331,7 +331,7 @@ def build_index(
             for line in frame_text.split('\n'):
                 if line_num > first_line and (line_num - first_line) % LINE_INDEX_INTERVAL == 0:
                     decompressed_offset = frame.decompressed_offset + byte_offset
-                    line_index.append((line_num, decompressed_offset, frame.index))
+                    line_index.append([line_num, decompressed_offset, frame.index])
 
                 byte_offset += len(line.encode('utf-8')) + 1  # +1 for newline
                 line_num += 1

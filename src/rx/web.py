@@ -33,14 +33,6 @@ from rx.hooks import (
     get_effective_hooks,
     get_hook_env_config,
 )
-from rx.index import (
-    calculate_exact_line_for_offset,
-    calculate_exact_offset_for_line,
-    get_index_path,
-    get_large_file_threshold_bytes,
-    is_index_valid,
-    load_index,
-)
 from rx.indexer import FileIndexer
 from rx.models import (
     ComplexityResponse,
@@ -69,6 +61,13 @@ from rx.seekable_index import build_index as build_seekable_index
 from rx.seekable_zstd import create_seekable_zstd
 from rx.task_manager import TaskManager, TaskStatus
 from rx.trace import HookCallbacks, parse_paths
+from rx.unified_index import (
+    calculate_exact_line_for_offset,
+    calculate_exact_offset_for_line,
+    calculate_line_info_for_offsets,
+    get_large_file_threshold_bytes,
+    load_index,
+)
 from rx.utils import NEWLINE_SYMBOL, get_rx_cache_base
 
 
@@ -844,8 +843,6 @@ def get_lines_for_byte_range(path: str, start_offset: int, end_offset: int, inde
     Efficiently reads only the required portion of the file using seek.
     Returns lines from the first line containing start_offset to the last line containing end_offset.
     """
-    from rx.index import calculate_line_info_for_offsets
-
     # Get line info for both offsets in a single pass
     line_infos = calculate_line_info_for_offsets(path, [start_offset, end_offset], index)
 
@@ -945,30 +942,25 @@ def get_total_line_count(path: str) -> int:
     Returns:
         Total number of lines in the file
     """
-    from rx.unified_index import load_index as load_unified_index
-
     # Try unified index cache first
-    unified_idx = load_unified_index(path)
+    unified_idx = load_index(path)
     if unified_idx and unified_idx.line_count:
         return unified_idx.line_count
 
-    # Try old index cache
-    if is_index_valid(path):
-        index_path = get_index_path(path)
-        file_index = load_index(index_path)
-        if file_index and file_index.line_index:
-            line_index = file_index.line_index
-            # Get the last indexed line number and offset
-            last_line, last_offset = line_index[-1]
+    # Use index + count remaining if line_count not available
+    if unified_idx and unified_idx.line_index:
+        line_index = unified_idx.line_index
+        # Get the last indexed line number and offset
+        last_line, last_offset = line_index[-1]
 
-            # Count remaining lines after the last indexed position
-            remaining_lines = 0
-            with open(path, 'rb') as f:
-                f.seek(last_offset)
-                for _ in f:
-                    remaining_lines += 1
+        # Count remaining lines after the last indexed position
+        remaining_lines = 0
+        with open(path, 'rb') as f:
+            f.seek(last_offset)
+            for _ in f:
+                remaining_lines += 1
 
-            return last_line + remaining_lines - 1
+        return last_line + remaining_lines - 1
 
     # Fallback: count lines directly
     with open(path, 'rb') as f:
@@ -1187,9 +1179,8 @@ async def samples(
             }
 
         # Regular file handling
-        # Load index once for mapping calculations
-        index_path_val = get_index_path(path)
-        file_index = await anyio.to_thread.run_sync(load_index, index_path_val)
+        # Load unified index once for mapping calculations
+        file_index = await anyio.to_thread.run_sync(load_index, path)
 
         # Get file size for negative byte offset conversion
         file_size = os.path.getsize(path)
@@ -1750,18 +1741,16 @@ def get_entry_metadata(entry_path: str, entry_name: str, is_dir: bool) -> dict:
                 result['is_compressed'] = False
                 result['is_text'] = is_text_file(entry_path)
 
-            # Check index status
-            if is_index_valid(entry_path):
-                result['is_indexed'] = True
-                # Try to get line count from index
-                try:
-                    index_path = get_index_path(entry_path)
-                    file_index = load_index(index_path)
-                    if file_index and file_index.analysis:
-                        result['line_count'] = file_index.analysis.line_count
-                except Exception:
-                    pass
-            else:
+            # Check index status using unified index
+            try:
+                file_index = load_index(entry_path)
+                if file_index:
+                    result['is_indexed'] = True
+                    if file_index.line_count:
+                        result['line_count'] = file_index.line_count
+                else:
+                    result['is_indexed'] = False
+            except Exception:
                 result['is_indexed'] = False
 
     except (OSError, PermissionError) as e:

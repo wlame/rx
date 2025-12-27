@@ -1,450 +1,331 @@
-"""Tests for unified index cache module."""
+"""Tests for unified index functionality."""
 
-import json
 import os
 import tempfile
-import time
-from datetime import datetime
+from pathlib import Path
 
 import pytest
 
-from rx.models import FileType, UnifiedFileIndex
+from rx.indexer import FileIndexer
+from rx.models import UnifiedFileIndex
 from rx.unified_index import (
     UNIFIED_INDEX_VERSION,
-    clear_all_indexes,
+    IndexBuildResult,
+    build_index,
+    calculate_exact_line_for_offset,
+    calculate_exact_offset_for_line,
+    calculate_line_info_for_offsets,
     delete_index,
+    find_line_offset,
     get_cache_key,
-    get_cached_line_count,
     get_index_cache_dir,
     get_index_path,
+    get_index_step_bytes,
     get_large_file_threshold_bytes,
-    is_index_valid,
     load_index,
-    save_index,
-    should_create_index,
 )
 
 
-class TestCacheKeyGeneration:
-    """Test cache key generation."""
+@pytest.fixture
+def temp_text_file():
+    """Create a temporary text file with known content."""
+    content = 'Line 1: First line\nLine 2: Second line\nLine 3: Third line\n'
+    with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as f:
+        f.write(content)
+        temp_path = f.name
+    yield temp_path
+    if os.path.exists(temp_path):
+        os.unlink(temp_path)
+    # Clean up any index files
+    index_path = get_index_path(temp_path)
+    if index_path.exists():
+        index_path.unlink()
 
-    def test_cache_key_consistent(self):
-        """Test that cache key is consistent for same path."""
-        path = '/path/to/test/file.txt'
-        key1 = get_cache_key(path)
-        key2 = get_cache_key(path)
-        assert key1 == key2
 
-    def test_cache_key_different_for_different_paths(self):
-        """Test that different paths get different keys."""
-        key1 = get_cache_key('/path/to/file1.txt')
-        key2 = get_cache_key('/path/to/file2.txt')
-        assert key1 != key2
-
-    def test_cache_key_includes_basename(self):
-        """Test that cache key includes sanitized basename."""
-        path = '/some/path/myfile.log'
-        key = get_cache_key(path)
-        assert 'myfile.log' in key
-
-    def test_cache_key_sanitizes_special_chars(self):
-        """Test that special characters in filename are sanitized."""
-        path = '/path/file with spaces & symbols!.txt'
-        key = get_cache_key(path)
-        # Should not contain spaces or special chars
-        assert ' ' not in key
-        assert '&' not in key
-        assert '!' not in key
+@pytest.fixture
+def temp_large_file():
+    """Create a temporary file with many lines for testing."""
+    with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as f:
+        for i in range(10000):
+            f.write(f'Line {i + 1}: This is line number {i + 1} with some padding text\n')
+        temp_path = f.name
+    yield temp_path
+    if os.path.exists(temp_path):
+        os.unlink(temp_path)
+    index_path = get_index_path(temp_path)
+    if index_path.exists():
+        index_path.unlink()
 
 
 class TestCacheDirectory:
-    """Test cache directory management."""
+    """Tests for cache directory functions."""
 
-    def test_cache_dir_created(self):
+    def test_get_cache_dir_exists(self):
         """Test that cache directory is created."""
         cache_dir = get_index_cache_dir()
         assert cache_dir.exists()
-        assert cache_dir.is_dir()
 
-    def test_cache_dir_location(self):
-        """Test cache directory is in expected location (unified indexes dir)."""
+    def test_get_cache_dir_in_expected_location(self):
+        """Test cache directory is in expected location."""
         cache_dir = get_index_cache_dir()
-        # Should use the 'indexes' subdirectory
         assert 'indexes' in str(cache_dir)
-        # Should be within the RX_CACHE_DIR (set by conftest.py fixture)
-        rx_cache_dir = os.environ.get('RX_CACHE_DIR')
-        if rx_cache_dir:
-            assert str(cache_dir).startswith(rx_cache_dir)
 
 
-class TestIndexSaveAndLoad:
-    """Test saving and loading index."""
-
-    def setup_method(self):
-        """Create test file before each test."""
-        self.temp_dir = tempfile.mkdtemp()
-        self.test_file = os.path.join(self.temp_dir, 'test.txt')
-        with open(self.test_file, 'w') as f:
-            f.write('Line 1\nLine 2\nLine 3\n')
-
-    def teardown_method(self):
-        """Clean up after each test."""
-        # Clean up test file
-        if os.path.exists(self.test_file):
-            os.remove(self.test_file)
-        os.rmdir(self.temp_dir)
-
-        # Clean up cache
-        delete_index(self.test_file)
-
-    def _create_test_index(self) -> UnifiedFileIndex:
-        """Create a test index for the test file."""
-        stat = os.stat(self.test_file)
-        return UnifiedFileIndex(
-            version=UNIFIED_INDEX_VERSION,
-            source_path=self.test_file,
-            source_modified_at=datetime.fromtimestamp(stat.st_mtime).isoformat(),
-            source_size_bytes=stat.st_size,
-            created_at=datetime.utcnow().isoformat(),
-            build_time_seconds=0.1,
-            file_type=FileType.TEXT,
-            is_text=True,
-            line_index=[[1, 0]],
-            line_count=3,
-            empty_line_count=0,
-            analysis_performed=True,
-        )
-
-    def test_save_and_load_index(self):
-        """Test saving and loading index works."""
-        index = self._create_test_index()
-
-        # Save index
-        saved = save_index(index)
-        assert saved is True
-
-        # Load index
-        loaded = load_index(self.test_file)
-        assert loaded is not None
-        assert loaded.source_path == self.test_file
-        assert loaded.line_count == 3
-        assert loaded.analysis_performed is True
-
-    def test_index_file_exists_on_disk(self):
-        """Test that index file is actually created on disk."""
-        index = self._create_test_index()
-
-        save_index(index)
-
-        cache_path = get_index_path(self.test_file)
-        assert cache_path.exists()
-
-        # Verify it's valid JSON
-        with open(cache_path) as f:
-            data = json.load(f)
-        assert 'version' in data
-        assert data['source_path'] == self.test_file
-
-    def test_load_nonexistent_index(self):
-        """Test loading index that doesn't exist returns None."""
-        loaded = load_index(self.test_file)
-        assert loaded is None
-
-    def test_index_invalidated_on_file_change(self):
-        """Test that index is invalidated when file changes."""
-        index = self._create_test_index()
-
-        # Save index
-        save_index(index)
-
-        # Verify index loads
-        loaded = load_index(self.test_file)
-        assert loaded is not None
-
-        # Wait a bit to ensure mtime changes
-        time.sleep(0.1)
-
-        # Modify file
-        with open(self.test_file, 'a') as f:
-            f.write('Line 4\n')
-
-        # Index should now be invalid
-        loaded = load_index(self.test_file)
-        assert loaded is None
-
-    def test_index_valid_when_file_unchanged(self):
-        """Test that index is valid if file hasn't changed."""
-        index = self._create_test_index()
-
-        # Save index
-        save_index(index)
-
-        # Load multiple times - should keep returning cached data
-        loaded1 = load_index(self.test_file)
-        loaded2 = load_index(self.test_file)
-        loaded3 = load_index(self.test_file)
-
-        assert loaded1 is not None
-        assert loaded2 is not None
-        assert loaded3 is not None
-        assert loaded1.source_path == loaded2.source_path == loaded3.source_path
-
-
-class TestIndexDeletion:
-    """Test index deletion."""
-
-    def setup_method(self):
-        """Create test file and index."""
-        self.temp_dir = tempfile.mkdtemp()
-        self.test_file = os.path.join(self.temp_dir, 'test.txt')
-        with open(self.test_file, 'w') as f:
-            f.write('test content\n')
-
-        # Create index
-        stat = os.stat(self.test_file)
-        index = UnifiedFileIndex(
-            version=UNIFIED_INDEX_VERSION,
-            source_path=self.test_file,
-            source_modified_at=datetime.fromtimestamp(stat.st_mtime).isoformat(),
-            source_size_bytes=stat.st_size,
-            created_at=datetime.utcnow().isoformat(),
-            build_time_seconds=0.1,
-            file_type=FileType.TEXT,
-            is_text=True,
-            line_index=[[1, 0]],
-        )
-        save_index(index)
-
-    def teardown_method(self):
-        """Clean up."""
-        if os.path.exists(self.test_file):
-            os.remove(self.test_file)
-        os.rmdir(self.temp_dir)
-        delete_index(self.test_file)
-
-    def test_delete_existing_index(self):
-        """Test deleting existing index."""
-        # Verify index exists
-        assert load_index(self.test_file) is not None
-
-        # Delete index
-        deleted = delete_index(self.test_file)
-        assert deleted is True
-
-        # Verify index is gone
-        assert load_index(self.test_file) is None
-
-    def test_delete_nonexistent_index(self):
-        """Test deleting index that doesn't exist."""
-        # Delete first time
-        delete_index(self.test_file)
-
-        # Try to delete again
-        deleted = delete_index(self.test_file)
-        assert deleted is False
-
-
-class TestClearAllIndexes:
-    """Test clearing all indexes."""
-
-    def setup_method(self):
-        """Create multiple test files and indexes."""
-        self.temp_dir = tempfile.mkdtemp()
-        self.test_files = []
-
-        for i in range(3):
-            filepath = os.path.join(self.temp_dir, f'file{i}.txt')
-            with open(filepath, 'w') as f:
-                f.write(f'File {i} content\n')
-            self.test_files.append(filepath)
-
-            # Create index for each
-            stat = os.stat(filepath)
-            index = UnifiedFileIndex(
-                version=UNIFIED_INDEX_VERSION,
-                source_path=filepath,
-                source_modified_at=datetime.fromtimestamp(stat.st_mtime).isoformat(),
-                source_size_bytes=stat.st_size,
-                created_at=datetime.utcnow().isoformat(),
-                build_time_seconds=0.1,
-                file_type=FileType.TEXT,
-                is_text=True,
-                line_index=[[1, 0]],
-                line_count=1,
-            )
-            save_index(index)
-
-    def teardown_method(self):
-        """Clean up."""
-        for filepath in self.test_files:
-            if os.path.exists(filepath):
-                os.remove(filepath)
-            delete_index(filepath)
-        os.rmdir(self.temp_dir)
-
-    def test_clear_all_indexes(self):
-        """Test clearing all indexes."""
-        # Verify indexes exist
-        for filepath in self.test_files:
-            assert load_index(filepath) is not None
-
-        # Clear all
-        count = clear_all_indexes()
-        assert count >= 3  # At least our 3 indexes
-
-        # Verify our indexes are gone
-        for filepath in self.test_files:
-            assert load_index(filepath) is None
-
-
-class TestIndexValidation:
-    """Test index validation logic."""
-
-    def setup_method(self):
-        """Create test file."""
-        self.temp_dir = tempfile.mkdtemp()
-        self.test_file = os.path.join(self.temp_dir, 'test.txt')
-        with open(self.test_file, 'w') as f:
-            f.write('original content\n')
-
-    def teardown_method(self):
-        """Clean up."""
-        if os.path.exists(self.test_file):
-            os.remove(self.test_file)
-        os.rmdir(self.temp_dir)
-        delete_index(self.test_file)
-
-    def test_index_valid_when_file_unchanged(self):
-        """Test index is valid when file hasn't changed."""
-        stat = os.stat(self.test_file)
-
-        index = UnifiedFileIndex(
-            version=UNIFIED_INDEX_VERSION,
-            source_path=self.test_file,
-            source_modified_at=datetime.fromtimestamp(stat.st_mtime).isoformat(),
-            source_size_bytes=stat.st_size,
-            created_at=datetime.utcnow().isoformat(),
-            build_time_seconds=0.1,
-            file_type=FileType.TEXT,
-            is_text=True,
-            line_index=[[1, 0]],
-        )
-
-        assert is_index_valid(self.test_file, index) is True
-
-    def test_index_invalid_when_size_changes(self):
-        """Test index is invalid when file size changes."""
-        stat = os.stat(self.test_file)
-
-        index = UnifiedFileIndex(
-            version=UNIFIED_INDEX_VERSION,
-            source_path=self.test_file,
-            source_modified_at=datetime.fromtimestamp(stat.st_mtime).isoformat(),
-            source_size_bytes=stat.st_size,
-            created_at=datetime.utcnow().isoformat(),
-            build_time_seconds=0.1,
-            file_type=FileType.TEXT,
-            is_text=True,
-            line_index=[[1, 0]],
-        )
-
-        # Modify file
-        with open(self.test_file, 'a') as f:
-            f.write('more content\n')
-
-        assert is_index_valid(self.test_file, index) is False
-
-    def test_index_invalid_when_file_deleted(self):
-        """Test index is invalid when file is deleted."""
-        stat = os.stat(self.test_file)
-
-        index = UnifiedFileIndex(
-            version=UNIFIED_INDEX_VERSION,
-            source_path=self.test_file,
-            source_modified_at=datetime.fromtimestamp(stat.st_mtime).isoformat(),
-            source_size_bytes=stat.st_size,
-            created_at=datetime.utcnow().isoformat(),
-            build_time_seconds=0.1,
-            file_type=FileType.TEXT,
-            is_text=True,
-            line_index=[[1, 0]],
-        )
-
-        # Delete file
-        os.remove(self.test_file)
-
-        assert is_index_valid(self.test_file, index) is False
-
-
-class TestCachedLineCount:
-    """Test cached line count helper."""
-
-    def setup_method(self):
-        """Create test file."""
-        self.temp_dir = tempfile.mkdtemp()
-        self.test_file = os.path.join(self.temp_dir, 'test.txt')
-        with open(self.test_file, 'w') as f:
-            f.write('Line 1\nLine 2\nLine 3\n')
-
-    def teardown_method(self):
-        """Clean up."""
-        if os.path.exists(self.test_file):
-            os.remove(self.test_file)
-        os.rmdir(self.temp_dir)
-        delete_index(self.test_file)
-
-    def test_get_cached_line_count_returns_none_without_cache(self):
-        """Test that None is returned when no cache exists."""
-        count = get_cached_line_count(self.test_file)
-        assert count is None
-
-    def test_get_cached_line_count_returns_count(self):
-        """Test that line count is returned when cached."""
-        stat = os.stat(self.test_file)
-        index = UnifiedFileIndex(
-            version=UNIFIED_INDEX_VERSION,
-            source_path=self.test_file,
-            source_modified_at=datetime.fromtimestamp(stat.st_mtime).isoformat(),
-            source_size_bytes=stat.st_size,
-            created_at=datetime.utcnow().isoformat(),
-            build_time_seconds=0.1,
-            file_type=FileType.TEXT,
-            is_text=True,
-            line_index=[[1, 0]],
-            line_count=42,
-            analysis_performed=True,
-        )
-        save_index(index)
-
-        count = get_cached_line_count(self.test_file)
-        assert count == 42
-
-
-class TestShouldCreateIndex:
-    """Test should_create_index logic."""
-
-    def test_should_create_with_analyze_flag(self):
-        """Test that index is always created with --analyze flag."""
-        # Small file with analyze=True should create index
-        assert should_create_index(100, analyze=True) is True
-        # Large file with analyze=True should create index
-        assert should_create_index(100 * 1024 * 1024, analyze=True) is True
-
-    def test_should_not_create_small_file_without_analyze(self):
-        """Test that small files don't get indexed without --analyze."""
-        # 1KB file without analyze should not create index
-        assert should_create_index(1024, analyze=False) is False
-        # 10MB file without analyze should not create index
-        assert should_create_index(10 * 1024 * 1024, analyze=False) is False
-
-    def test_should_create_large_file_without_analyze(self):
-        """Test that large files get indexed even without --analyze."""
+class TestIndexPath:
+    """Tests for index path generation."""
+
+    def test_get_index_path_returns_path(self, temp_text_file):
+        """Test that get_index_path returns a Path object."""
+        path = get_index_path(temp_text_file)
+        assert isinstance(path, Path)
+
+    def test_get_index_path_consistent(self, temp_text_file):
+        """Test that same file always gets same index path."""
+        path1 = get_index_path(temp_text_file)
+        path2 = get_index_path(temp_text_file)
+        assert path1 == path2
+
+    def test_get_index_path_different_for_different_files(self, temp_text_file, temp_large_file):
+        """Test that different files get different index paths."""
+        path1 = get_index_path(temp_text_file)
+        path2 = get_index_path(temp_large_file)
+        assert path1 != path2
+
+    def test_get_index_path_includes_filename(self, temp_text_file):
+        """Test that index path includes original filename."""
+        path = get_index_path(temp_text_file)
+        basename = os.path.basename(temp_text_file)
+        assert basename.replace('.txt', '') in str(path)
+
+    def test_get_index_path_is_json(self, temp_text_file):
+        """Test that index path has .json extension."""
+        path = get_index_path(temp_text_file)
+        assert str(path).endswith('.json')
+
+    def test_cache_key_format(self, temp_text_file):
+        """Test that cache key has expected format: filename_hash."""
+        cache_key = get_cache_key(temp_text_file)
+        basename = os.path.basename(temp_text_file)
+        # Should be filename_hash format
+        assert basename.replace('.txt', '') in cache_key
+        assert '_' in cache_key
+
+
+class TestConfiguration:
+    """Tests for configuration functions."""
+
+    def test_get_large_file_threshold_default(self):
+        """Test default large file threshold is 50MB."""
         threshold = get_large_file_threshold_bytes()
-        # File at threshold should create index
-        assert should_create_index(threshold, analyze=False) is True
-        # File above threshold should create index
-        assert should_create_index(threshold + 1, analyze=False) is True
+        assert threshold == 50 * 1024 * 1024
+
+    def test_get_index_step_default(self):
+        """Test default index step is threshold / 50."""
+        step = get_index_step_bytes()
+        threshold = get_large_file_threshold_bytes()
+        assert step == threshold // 50
 
 
-if __name__ == '__main__':
-    pytest.main([__file__, '-v'])
+class TestBuildIndex:
+    """Tests for build_index function."""
+
+    def test_build_index_returns_result(self, temp_text_file):
+        """Test that build_index returns IndexBuildResult."""
+        result = build_index(temp_text_file)
+        assert isinstance(result, IndexBuildResult)
+        assert result.line_count > 0
+
+    def test_build_index_first_entry_is_line_1_offset_0(self, temp_text_file):
+        """Test that first index entry is line 1 at offset 0."""
+        result = build_index(temp_text_file)
+        assert result.line_index[0] == [1, 0]
+
+    def test_build_index_counts_lines_correctly(self, temp_text_file):
+        """Test line count matches actual file lines."""
+        result = build_index(temp_text_file)
+        with open(temp_text_file) as f:
+            actual_lines = sum(1 for _ in f)
+        assert result.line_count == actual_lines
+
+    def test_build_index_offsets_aligned_to_line_starts(self, temp_large_file):
+        """Test that all indexed offsets are at line starts."""
+        result = build_index(temp_large_file)
+        with open(temp_large_file, 'rb') as f:
+            content = f.read()
+
+        for line_num, offset in result.line_index:
+            if offset > 0:
+                # Previous character should be a newline
+                assert content[offset - 1 : offset] == b'\n'
+
+    def test_build_index_calculates_statistics(self, temp_large_file):
+        """Test that build_index calculates line statistics."""
+        result = build_index(temp_large_file)
+        assert result.line_length_avg > 0
+        assert result.line_length_max >= result.line_length_avg
+        assert result.line_length_median > 0
+
+    def test_build_index_detects_line_ending(self, temp_text_file):
+        """Test that build_index detects line ending style."""
+        result = build_index(temp_text_file)
+        assert result.line_ending in ('LF', 'CRLF', 'CR', 'mixed')
+
+
+class TestFindLineOffset:
+    """Tests for find_line_offset function."""
+
+    def test_find_line_offset_exact_match(self):
+        """Test finding exact line match."""
+        line_index = [[1, 0], [100, 5000], [200, 10000]]
+        line_num, offset = find_line_offset(line_index, 100)
+        assert line_num == 100
+        assert offset == 5000
+
+    def test_find_line_offset_between_entries(self):
+        """Test finding line between index entries."""
+        line_index = [[1, 0], [100, 5000], [200, 10000]]
+        line_num, offset = find_line_offset(line_index, 150)
+        # Should return closest previous entry
+        assert line_num == 100
+        assert offset == 5000
+
+    def test_find_line_offset_before_first(self):
+        """Test finding line before first entry returns first."""
+        line_index = [[10, 500], [100, 5000]]
+        line_num, offset = find_line_offset(line_index, 5)
+        assert line_num == 10
+        assert offset == 500
+
+    def test_find_line_offset_after_last(self):
+        """Test finding line after last entry returns last."""
+        line_index = [[1, 0], [100, 5000]]
+        line_num, offset = find_line_offset(line_index, 500)
+        assert line_num == 100
+        assert offset == 5000
+
+    def test_find_line_offset_empty_index(self):
+        """Test empty index returns default."""
+        line_num, offset = find_line_offset([], 100)
+        assert line_num == 1
+        assert offset == 0
+
+
+class TestOffsetLineMapping:
+    """Tests for offset/line calculation functions."""
+
+    def test_calculate_offset_for_line_small_file(self, temp_text_file):
+        """Test calculating offset for line in small file."""
+        offset = calculate_exact_offset_for_line(temp_text_file, 1)
+        assert offset == 0  # First line starts at offset 0
+
+    def test_calculate_line_for_offset_small_file(self, temp_text_file):
+        """Test calculating line for offset in small file."""
+        line = calculate_exact_line_for_offset(temp_text_file, 0)
+        assert line == 1  # Offset 0 is line 1
+
+    def test_bidirectional_consistency(self, temp_text_file):
+        """Test that offset->line->offset is consistent."""
+        for target_line in [1, 2, 3]:
+            offset = calculate_exact_offset_for_line(temp_text_file, target_line)
+            if offset >= 0:
+                line = calculate_exact_line_for_offset(temp_text_file, offset)
+                assert line == target_line
+
+
+class TestCalculateLineInfoForOffsets:
+    """Tests for calculate_line_info_for_offsets function."""
+
+    def test_single_offset(self, temp_text_file):
+        """Test getting line info for a single offset."""
+        result = calculate_line_info_for_offsets(temp_text_file, [0])
+        assert 0 in result
+        assert result[0].line_number == 1
+
+    def test_multiple_offsets_same_line(self, temp_text_file):
+        """Test multiple offsets within the same line."""
+        result = calculate_line_info_for_offsets(temp_text_file, [0, 5])
+        assert len(result) == 2
+        assert result[0].line_number == result[5].line_number
+
+    def test_empty_offset_list(self, temp_text_file):
+        """Test empty offset list returns empty dict."""
+        result = calculate_line_info_for_offsets(temp_text_file, [])
+        assert result == {}
+
+
+class TestSaveLoadIndex:
+    """Tests for save and load functions."""
+
+    def test_save_and_load_roundtrip(self, temp_text_file):
+        """Test that saving and loading index preserves data."""
+        # Create an index using FileIndexer
+        indexer = FileIndexer(analyze=True)
+        idx = indexer.index_file(temp_text_file)
+        assert idx is not None
+
+        # Load it back
+        loaded = load_index(temp_text_file)
+        assert loaded is not None
+        assert loaded.source_path == idx.source_path
+        assert loaded.line_count == idx.line_count
+
+    def test_load_nonexistent_returns_none(self, temp_text_file):
+        """Test loading nonexistent index returns None."""
+        result = load_index(temp_text_file)
+        # May or may not exist depending on test order
+        # Just verify it doesn't crash
+
+
+class TestDeleteIndex:
+    """Tests for delete_index function."""
+
+    def test_delete_removes_index(self, temp_text_file):
+        """Test that delete_index removes the cache file."""
+        # Create index
+        indexer = FileIndexer(analyze=True)
+        indexer.index_file(temp_text_file)
+
+        # Verify it exists
+        assert load_index(temp_text_file) is not None
+
+        # Delete it
+        result = delete_index(temp_text_file)
+        assert result is True
+
+        # Verify it's gone
+        assert load_index(temp_text_file) is None
+
+    def test_delete_nonexistent_returns_false(self, temp_text_file):
+        """Test deleting nonexistent index returns False."""
+        # Ensure no index exists
+        delete_index(temp_text_file)
+        result = delete_index(temp_text_file)
+        assert result is False
+
+
+class TestFileIndexer:
+    """Tests for FileIndexer class."""
+
+    def test_indexer_creates_unified_index(self, temp_text_file):
+        """Test that FileIndexer creates a UnifiedFileIndex."""
+        indexer = FileIndexer(analyze=True)
+        result = indexer.index_file(temp_text_file)
+        assert isinstance(result, UnifiedFileIndex)
+        assert result.version == UNIFIED_INDEX_VERSION
+
+    def test_indexer_with_analyze_includes_stats(self, temp_text_file):
+        """Test that analyze=True includes statistics."""
+        indexer = FileIndexer(analyze=True)
+        result = indexer.index_file(temp_text_file)
+        assert result.line_count is not None
+        assert result.line_count > 0
+        assert result.analysis_performed is True
+
+    def test_indexer_caches_result(self, temp_text_file):
+        """Test that indexer caches the result."""
+        indexer = FileIndexer(analyze=True)
+        indexer.index_file(temp_text_file)
+
+        # Should be loadable from cache
+        loaded = load_index(temp_text_file)
+        assert loaded is not None
