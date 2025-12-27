@@ -347,77 +347,101 @@ class TestAnalyzePath:
 
 
 class TestIndexEndpoint:
-    """Tests for /v1/index API endpoint"""
+    """Tests for /v1/index API endpoint (GET returns cached index data)"""
 
     def test_index_requires_path(self, client):
         """Test index endpoint requires path parameter"""
         response = client.get('/v1/index')
         assert response.status_code == 422  # Validation error
 
-    def test_index_single_file_with_analyze(self, client, temp_text_file):
-        """Test indexing a single file with analysis via API"""
-        response = client.get('/v1/index', params={'path': temp_text_file, 'analyze': True})
-        assert response.status_code == 200
-
-        data = response.json()
-        assert 'indexed' in data
-        assert 'skipped' in data
-        assert 'errors' in data
-        assert 'total_time' in data
-
-        assert len(data['indexed']) == 1
-        assert len(data['errors']) == 0
-
-    def test_index_with_max_workers(self, client, temp_text_file):
-        """Test indexing with custom max_workers parameter"""
-        response = client.get('/v1/index', params={'path': temp_text_file, 'analyze': True, 'max_workers': 5})
-        assert response.status_code == 200
-
-    def test_index_nonexistent_file(self, client, temp_root):
-        """Test indexing nonexistent file returns 404"""
-        nonexistent = os.path.join(temp_root, 'nonexistent.txt')
-        response = client.get('/v1/index', params={'path': nonexistent})
+    def test_index_returns_404_when_no_cache(self, client, temp_text_file):
+        """Test GET /v1/index returns 404 when no index exists"""
+        response = client.get('/v1/index', params={'path': temp_text_file})
         assert response.status_code == 404
+        assert 'No index found' in response.json()['detail']
+        assert 'POST /v1/index' in response.json()['detail']
 
-    def test_index_directory_with_analyze(self, client, temp_directory):
-        """Test indexing a directory with analysis via API"""
-        response = client.get('/v1/index', params={'path': temp_directory, 'analyze': True})
+    def test_index_returns_cached_data(self, client, temp_text_file):
+        """Test GET /v1/index returns cached index data after indexing"""
+        from rx.indexer import FileIndexer
+
+        # First create an index using FileIndexer
+        indexer = FileIndexer(analyze=True, force=True)
+        indexer.index_file(temp_text_file)
+
+        # Now GET should return the cached data
+        response = client.get('/v1/index', params={'path': temp_text_file})
         assert response.status_code == 200
 
         data = response.json()
-        assert len(data['indexed']) >= 1  # At least one file in directory
+        assert 'path' in data
+        assert 'file_type' in data
+        assert 'size_bytes' in data
+        assert 'line_count' in data
+        assert 'line_index' in data
+        assert 'index_entries' in data
+        assert 'analysis_performed' in data
+        assert data['analysis_performed'] is True
 
     def test_index_response_structure(self, client, temp_text_file):
         """Test that response matches expected structure"""
-        response = client.get('/v1/index', params={'path': temp_text_file, 'analyze': True})
+        from rx.indexer import FileIndexer
+
+        # Create index with analysis
+        indexer = FileIndexer(analyze=True, force=True)
+        indexer.index_file(temp_text_file)
+
+        response = client.get('/v1/index', params={'path': temp_text_file})
         assert response.status_code == 200
 
         data = response.json()
 
         # Validate response structure
-        result = data['indexed'][0]
-        assert 'path' in result
-        assert 'file_type' in result
-        assert 'size_bytes' in result
-        assert 'line_count' in result
-        assert 'index_entries' in result
-        assert 'analysis_performed' in result
-        assert 'build_time_seconds' in result
-        assert 'anomaly_count' in result
-        assert 'anomaly_summary' in result
+        assert 'path' in data
+        assert 'file_type' in data
+        assert 'size_bytes' in data
+        assert 'line_count' in data
+        assert 'empty_line_count' in data
+        assert 'line_ending' in data
+        assert 'line_index' in data
+        assert 'index_entries' in data
+        assert 'analysis_performed' in data
+        assert 'build_time_seconds' in data
+        assert 'anomaly_count' in data
+        assert 'anomaly_summary' in data
 
         # With analyze=True, analysis should be performed
-        assert result['analysis_performed'] is True
+        assert data['analysis_performed'] is True
 
-    def test_index_max_workers_validation(self, client, temp_text_file):
-        """Test max_workers parameter validation"""
-        # Too low
-        response = client.get('/v1/index', params={'path': temp_text_file, 'max_workers': 0})
-        assert response.status_code == 422
+    def test_index_includes_line_statistics(self, client, temp_text_file):
+        """Test that response includes line length statistics"""
+        from rx.indexer import FileIndexer
 
-        # Too high
-        response = client.get('/v1/index', params={'path': temp_text_file, 'max_workers': 100})
-        assert response.status_code == 422
+        # Create index with analysis
+        indexer = FileIndexer(analyze=True, force=True)
+        indexer.index_file(temp_text_file)
+
+        response = client.get('/v1/index', params={'path': temp_text_file})
+        assert response.status_code == 200
+
+        data = response.json()
+
+        # Should have line length stats
+        assert 'line_length' in data
+        if data['line_length'] is not None:
+            assert 'max' in data['line_length']
+            assert 'avg' in data['line_length']
+            assert 'median' in data['line_length']
+            assert 'p95' in data['line_length']
+            assert 'p99' in data['line_length']
+            assert 'stddev' in data['line_length']
+
+    def test_index_nonexistent_file(self, client, temp_root):
+        """Test GET for nonexistent file returns 404 (no index found)"""
+        nonexistent = os.path.join(temp_root, 'nonexistent.txt')
+        response = client.get('/v1/index', params={'path': nonexistent})
+        # Returns 404 because no index exists (file doesn't exist either)
+        assert response.status_code == 404
 
 
 class TestAnalyzeCLI:
@@ -1160,31 +1184,32 @@ ConnectionError: timeout
         assert 'anomaly_summary' in file_result
 
     def test_web_api_with_analyze(self, client, temp_log_with_errors):
-        """Test web API with analyze=true."""
-        response = client.get('/v1/index', params={'path': temp_log_with_errors, 'analyze': True})
+        """Test web API returns cached index with anomaly data."""
+        from rx.indexer import FileIndexer
 
-        assert response.status_code == 200
-        data = response.json()
+        # First create an index with analysis
+        indexer = FileIndexer(analyze=True, force=True)
+        indexer.index_file(temp_log_with_errors)
 
-        assert 'indexed' in data
-        assert len(data['indexed']) == 1
-        file_result = data['indexed'][0]
-
-        # Should have anomaly info when analyze=True
-        assert 'anomaly_count' in file_result
-        assert 'anomaly_summary' in file_result
-        assert file_result['anomaly_count'] > 0
-
-    def test_web_api_without_analyze(self, client, temp_log_with_errors):
-        """Test web API without analyze (default=false) - small file skipped."""
+        # GET should return the cached data with anomalies
         response = client.get('/v1/index', params={'path': temp_log_with_errors})
 
         assert response.status_code == 200
         data = response.json()
 
-        # Without analyze=True and file < 50MB, file should be skipped
-        assert 'skipped' in data
-        assert len(data['skipped']) == 1 or len(data['indexed']) == 0
+        # Should have anomaly info when analysis was performed
+        assert 'anomaly_count' in data
+        assert 'anomaly_summary' in data
+        assert data['anomaly_count'] > 0
+        assert data['analysis_performed'] is True
+
+    def test_web_api_without_index(self, client, temp_log_with_errors):
+        """Test web API returns 404 when no index exists."""
+        response = client.get('/v1/index', params={'path': temp_log_with_errors})
+
+        # Without an index, should return 404
+        assert response.status_code == 404
+        assert 'No index found' in response.json()['detail']
 
 
 class TestVeryLargeFileFastPath:

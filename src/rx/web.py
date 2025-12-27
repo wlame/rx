@@ -21,6 +21,7 @@ from rx import file_utils as file_utils_module
 # Import real prometheus for server mode and swap it into file_utils module
 from rx import prometheus as prom
 from rx import trace as trace_module
+from rx import unified_index
 from rx.__version__ import __version__
 from rx.compressed_index import get_decompressed_content_at_line, get_or_build_compressed_index
 from rx.compression import CompressionFormat, detect_compression, is_compressed
@@ -35,7 +36,6 @@ from rx.hooks import (
 from rx.index import (
     calculate_exact_line_for_offset,
     calculate_exact_offset_for_line,
-    create_index_file,
     get_index_path,
     get_large_file_threshold_bytes,
     is_index_valid,
@@ -66,7 +66,7 @@ from rx.path_security import (
 from rx.regex import calculate_regex_complexity
 from rx.request_store import store_request, update_request
 from rx.seekable_index import build_index as build_seekable_index
-from rx.seekable_zstd import create_seekable_zstd, is_seekable_zstd
+from rx.seekable_zstd import create_seekable_zstd
 from rx.task_manager import TaskManager, TaskStatus
 from rx.trace import HookCallbacks, parse_paths
 from rx.utils import NEWLINE_SYMBOL, get_rx_cache_base
@@ -653,120 +653,144 @@ async def complexity(
 @app.get(
     '/v1/index',
     tags=['Indexing'],
-    summary='Index files with optional analysis',
+    summary='Get cached index data for a file',
     responses={
-        200: {'description': 'File indexing completed'},
-        404: {'description': 'Path not found'},
-        500: {'description': 'Internal error during indexing'},
+        200: {'description': 'Index data returned'},
+        403: {'description': 'Path outside search roots'},
+        404: {'description': 'Index not found - use POST /v1/index to create'},
     },
 )
-async def index_files(
-    path: str | list[str] = Query(..., description='File or directory path(s) to index', examples=['/var/log/app.log']),
-    analyze: bool = Query(False, description='Run full analysis with anomaly detection (indexes ALL files)'),
-    force: bool = Query(False, description='Force rebuild even if valid index exists'),
-    recursive: bool = Query(True, description='Recursively process directories'),
-    max_workers: int = Query(10, description='Maximum number of parallel workers', ge=1, le=50, examples=[10]),
+async def get_index(
+    path: str = Query(..., description='File path to get index for', examples=['/var/log/app.log']),
 ) -> dict:
     """
-    Index files with optional analysis and anomaly detection.
+    Get cached index data for a file.
 
-    This endpoint creates unified file indexes that enable efficient line-based
-    access to large text files.
+    Returns the full index data including line offset mapping, line statistics,
+    and anomalies (if analysis was performed).
 
-    **Index behavior:**
-    - Without **analyze=true**: Only indexes files >= 50MB
-    - With **analyze=true**: Indexes ALL files with full analysis
+    If no index exists for the file, returns 404 with a message to use
+    POST /v1/index to create an indexing task.
 
-    **With analyze=true, the endpoint also detects:**
-    - Python/Java/JavaScript/Go/Rust stack traces
-    - Lines containing ERROR, FATAL, Exception keywords
-    - Unusually long lines (statistical outliers)
-    - High-entropy strings (potential secrets)
-    - Format deviations from dominant log pattern
-
-    **Returns:**
-    - **indexed**: List of successfully indexed files with metadata
-    - **skipped**: Files skipped (below threshold or not text)
-    - **errors**: Files that failed to index
-    - **total_time**: Total indexing time in seconds
+    **Returns (same schema as CLI `rx index --json`):**
+    - **path**: File path
+    - **file_type**: TEXT, BINARY, COMPRESSED, or SEEKABLE_ZSTD
+    - **size_bytes**: File size in bytes
+    - **line_index**: Array of [line_number, byte_offset] entries
+    - **line_count**, **empty_line_count**, **line_ending**: Line statistics
+    - **line_length**: Object with max, avg, median, p95, p99, stddev
+    - **longest_line**: Object with line_number and byte_offset
+    - **analysis_performed**: Whether full analysis was done
+    - **anomaly_count**, **anomaly_summary**, **anomalies**: Anomaly data (if analyzed)
     """
     try:
-        # Convert single path to list
-        paths = path if isinstance(path, list) else [path]
-
-        # Validate paths are within search root (security check)
+        # Validate path security
         try:
-            validated_paths = validate_paths_within_root(paths)
-            paths = [str(p) for p in validated_paths]
-        except PermissionError as e:
+            validated_path = validate_path_within_root(path)
+            path = str(validated_path)
+        except (PermissionError, ValueError) as e:
             prom.record_error('access_denied')
             prom.record_http_response('GET', '/v1/index', 403)
             raise HTTPException(status_code=403, detail=str(e))
 
-        # Check paths exist
-        for p in paths:
-            if not os.path.exists(p):
-                prom.record_error('not_found')
-                prom.record_http_response('GET', '/v1/index', 404)
-                raise HTTPException(status_code=404, detail=f'Path not found: {p}')
+        # Try to load cached index
+        idx = unified_index.load_index(path)
 
-        # Create indexer and run
-        indexer = FileIndexer(analyze=analyze, force=force)
-
-        # Offload blocking file indexing to thread pool
-        result = await anyio.to_thread.run_sync(
-            partial(
-                indexer.index_paths,
-                paths=paths,
-                recursive=recursive,
-                max_workers=max_workers,
+        if idx is None:
+            prom.record_http_response('GET', '/v1/index', 404)
+            raise HTTPException(
+                status_code=404,
+                detail=f'No index found for {path}. Use POST /v1/index to create an indexing task.',
             )
-        )
 
-        # Build response
-        response = {
-            'indexed': [
-                {
-                    'path': idx.source_path,
-                    'file_type': idx.file_type.value,
-                    'size_bytes': idx.source_size_bytes,
-                    'line_count': idx.line_count,
-                    'index_entries': len(idx.line_index),
-                    'analysis_performed': idx.analysis_performed,
-                    'build_time_seconds': idx.build_time_seconds,
-                    'anomaly_count': len(idx.anomalies) if idx.anomalies else 0,
-                    'anomaly_summary': idx.anomaly_summary,
-                }
-                for idx in result.indexed
-            ],
-            'skipped': result.skipped,
-            'errors': [{'path': p, 'error': e} for p, e in result.errors],
-            'total_time': result.total_time,
-        }
+        # Build response with all index data (same schema as CLI --json)
+        response = _unified_index_to_dict(idx)
 
-        # Record metrics
-        total_bytes = sum(idx.source_size_bytes for idx in result.indexed)
-        prom.record_analyze_request(
-            status='success',
-            duration=result.total_time,
-            num_files=len(result.indexed),
-            num_skipped=len(result.skipped),
-            total_bytes=total_bytes,
-            num_workers=max_workers,
-        )
         prom.record_http_response('GET', '/v1/index', 200)
-
         return response
+
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f'Error indexing files: {e!s}')
+        logger.error(f'Error getting index: {e!s}')
         prom.record_error('internal_error')
-        prom.record_analyze_request(
-            status='error', duration=0, num_files=0, num_skipped=0, total_bytes=0, num_workers=max_workers
-        )
         prom.record_http_response('GET', '/v1/index', 500)
         raise HTTPException(status_code=500, detail=f'Internal error: {e!s}')
+
+
+def _unified_index_to_dict(idx) -> dict:
+    """Convert UnifiedFileIndex to JSON-serializable dict with all fields.
+
+    This is used by both GET /v1/index and the task result to ensure
+    consistent schema with CLI `rx index --json`.
+    """
+    data = {
+        'path': idx.source_path,
+        'file_type': idx.file_type.value,
+        'size_bytes': idx.source_size_bytes,
+        'created_at': idx.created_at,
+        'build_time_seconds': idx.build_time_seconds,
+        'analysis_performed': idx.analysis_performed,
+    }
+
+    # Line index (offset mapping)
+    if idx.line_index:
+        data['line_index'] = idx.line_index
+        data['index_entries'] = len(idx.line_index)
+    else:
+        data['line_index'] = []
+        data['index_entries'] = 0
+
+    # Line statistics
+    data['line_count'] = idx.line_count
+    data['empty_line_count'] = idx.empty_line_count
+    data['line_ending'] = idx.line_ending
+
+    # Line length statistics
+    if idx.line_length_max is not None:
+        data['line_length'] = {
+            'max': idx.line_length_max,
+            'avg': idx.line_length_avg,
+            'median': idx.line_length_median,
+            'p95': idx.line_length_p95,
+            'p99': idx.line_length_p99,
+            'stddev': idx.line_length_stddev,
+        }
+        if idx.line_length_max_line_number is not None:
+            data['longest_line'] = {
+                'line_number': idx.line_length_max_line_number,
+                'byte_offset': idx.line_length_max_byte_offset,
+            }
+    else:
+        data['line_length'] = None
+        data['longest_line'] = None
+
+    # Compression info
+    data['compression_format'] = idx.compression_format
+    data['decompressed_size_bytes'] = idx.decompressed_size_bytes
+    data['compression_ratio'] = idx.compression_ratio
+
+    # Anomaly info
+    data['anomaly_count'] = len(idx.anomalies) if idx.anomalies else 0
+    data['anomaly_summary'] = idx.anomaly_summary
+    if idx.anomalies:
+        data['anomalies'] = [
+            {
+                'start_line': a.start_line,
+                'end_line': a.end_line,
+                'start_offset': a.start_offset,
+                'end_offset': a.end_offset,
+                'severity': a.severity,
+                'category': a.category,
+                'description': a.description,
+                'detector': a.detector,
+            }
+            for a in idx.anomalies
+        ]
+    else:
+        data['anomalies'] = None
+
+    return data
 
 
 def parse_offset_or_range(value: str) -> tuple[int, int | None]:
@@ -1416,53 +1440,39 @@ async def run_index_task(
     request: IndexRequest,
     normalized_path: str,
 ):
-    """Run indexing in background."""
+    """Run indexing in background with optional analysis."""
 
     try:
         await task_manager.update_task(task_id, status=TaskStatus.RUNNING)
-        logger.info(f'[Task {task_id}] Starting indexing of {normalized_path}')
+        analyze_msg = ' with analysis' if request.analyze else ''
+        logger.info(f'[Task {task_id}] Starting indexing{analyze_msg} of {normalized_path}')
 
-        start_time = time()
+        # Use FileIndexer for unified indexing with optional analysis
+        indexer = FileIndexer(analyze=request.analyze, force=request.force)
 
-        # Check if it's a seekable zstd file
-        if is_seekable_zstd(normalized_path):
-            # Build seekable zstd index
-            result = await anyio.to_thread.run_sync(
-                partial(
-                    build_seekable_index,
-                    zst_path=normalized_path,
-                    progress_callback=None,
-                )
+        # Run indexing in thread pool
+        index_result = await anyio.to_thread.run_sync(partial(indexer.index_file, normalized_path))
+
+        # Check if indexing was skipped (file too small without analyze flag)
+        if index_result is None:
+            file_size = os.path.getsize(normalized_path)
+            error_msg = (
+                f'File skipped: {normalized_path} ({file_size} bytes). '
+                f'Use analyze=true to index files below the size threshold.'
             )
-            index_path = get_index_path(normalized_path)  # This will need seekable version
-            line_count = result.total_lines if result else None
-            checkpoint_count = len(result.frames) if result else None
-        else:
-            # Build regular file index
-            result = await anyio.to_thread.run_sync(
-                partial(
-                    create_index_file,
-                    source_path=normalized_path,
-                    force=request.force,
-                )
+            logger.warning(f'[Task {task_id}] {error_msg}')
+            await task_manager.update_task(
+                task_id,
+                status=TaskStatus.FAILED,
+                completed_at=datetime.now(UTC),
+                error=error_msg,
             )
-            index_path = get_index_path(normalized_path)
-            line_count = result.get('analysis', {}).get('line_count') if result else None
-            checkpoint_count = len(result.get('checkpoints', [])) if result else None
+            return
 
-        elapsed = time() - start_time
-        file_size = os.path.getsize(normalized_path)
-
-        # Build result dictionary
-        task_result = {
-            'success': True,
-            'path': normalized_path,
-            'index_path': index_path,
-            'line_count': line_count,
-            'file_size': file_size,
-            'checkpoint_count': checkpoint_count,
-            'time_seconds': elapsed,
-        }
+        # Build result using shared function for consistent schema with GET /v1/index
+        task_result = _unified_index_to_dict(index_result)
+        task_result['success'] = True
+        task_result['index_path'] = str(unified_index.get_index_path(normalized_path))
 
         await task_manager.update_task(
             task_id,
@@ -1470,7 +1480,7 @@ async def run_index_task(
             completed_at=datetime.now(UTC),
             result=task_result,
         )
-        logger.info(f'[Task {task_id}] Indexing completed in {elapsed:.2f}s')
+        logger.info(f'[Task {task_id}] Indexing completed in {index_result.build_time_seconds:.2f}s')
 
     except Exception as e:
         logger.error(f'[Task {task_id}] Indexing failed: {e!s}')
@@ -1578,10 +1588,24 @@ async def index(request: IndexRequest):
     **Parameters:**
     - **path**: File path to index
     - **force**: Force rebuild even if valid index exists (default: false)
+    - **analyze**: Run full analysis with anomaly detection (default: false)
     - **threshold**: Minimum file size in MB to index (default: from RX_LARGE_TEXT_FILE_MB env)
 
     **Returns:**
     Task information with task_id for status polling.
+
+    When task completes, the result contains:
+    - **path**: Indexed file path
+    - **index_path**: Path to the index file
+    - **file_type**: TEXT, BINARY, COMPRESSED, or SEEKABLE_ZSTD
+    - **size_bytes**: File size
+    - **line_count**: Total line count
+    - **index_entries**: Number of index entries
+    - **build_time_seconds**: Time taken to build index
+    - **analysis_performed**: Whether full analysis was run
+    - **anomaly_count**: Number of anomalies detected (if analyze=true)
+    - **anomaly_summary**: Anomaly counts by type (if analyze=true)
+    - **anomalies**: Full anomaly details (if analyze=true)
     """
 
     # Validate path security
@@ -1659,7 +1683,7 @@ async def get_task_status(task_id: str):
     return TaskStatusResponse(
         task_id=task.task_id,
         status=task.status.value,
-        path=task.path,
+        path=str(task.path),
         operation=task.operation,
         started_at=task.started_at.isoformat() if task.started_at else None,
         completed_at=task.completed_at.isoformat() if task.completed_at else None,

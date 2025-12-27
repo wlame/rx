@@ -182,27 +182,87 @@ def _handle_info_or_delete(
 
 
 def _output_json(result):
-    """Output indexing result as JSON."""
+    """Output indexing result as JSON with all collected data."""
     output = {
-        'indexed': [
-            {
-                'path': idx.source_path,
-                'file_type': idx.file_type.value,
-                'size_bytes': idx.source_size_bytes,
-                'line_count': idx.line_count,
-                'index_entries': len(idx.line_index),
-                'analysis_performed': idx.analysis_performed,
-                'build_time_seconds': idx.build_time_seconds,
-                'anomaly_count': len(idx.anomalies) if idx.anomalies else 0,
-                'anomaly_summary': idx.anomaly_summary,
-            }
-            for idx in result.indexed
-        ],
+        'indexed': [_index_to_json(idx) for idx in result.indexed],
         'skipped': result.skipped,
         'errors': [{'path': p, 'error': e} for p, e in result.errors],
         'total_time': result.total_time,
     }
     click.echo(json.dumps(output, indent=2))
+
+
+def _index_to_json(idx) -> dict:
+    """Convert UnifiedFileIndex to JSON-serializable dict with all fields."""
+    data = {
+        'path': idx.source_path,
+        'file_type': idx.file_type.value,
+        'size_bytes': idx.source_size_bytes,
+        'created_at': idx.created_at,
+        'build_time_seconds': idx.build_time_seconds,
+        'analysis_performed': idx.analysis_performed,
+    }
+
+    # Line index (offset mapping)
+    if idx.line_index:
+        data['line_index'] = idx.line_index
+        data['index_entries'] = len(idx.line_index)
+    else:
+        data['line_index'] = []
+        data['index_entries'] = 0
+
+    # Line statistics (always include if available)
+    if idx.line_count is not None:
+        data['line_count'] = idx.line_count
+    if idx.empty_line_count is not None:
+        data['empty_line_count'] = idx.empty_line_count
+    if idx.line_ending:
+        data['line_ending'] = idx.line_ending
+
+    # Line length statistics
+    if idx.line_length_max is not None:
+        data['line_length'] = {
+            'max': idx.line_length_max,
+            'avg': idx.line_length_avg,
+            'median': idx.line_length_median,
+            'p95': idx.line_length_p95,
+            'p99': idx.line_length_p99,
+            'stddev': idx.line_length_stddev,
+        }
+        if idx.line_length_max_line_number is not None:
+            data['longest_line'] = {
+                'line_number': idx.line_length_max_line_number,
+                'byte_offset': idx.line_length_max_byte_offset,
+            }
+
+    # Compression info (if applicable)
+    if idx.compression_format:
+        data['compression_format'] = idx.compression_format
+    if idx.decompressed_size_bytes is not None:
+        data['decompressed_size_bytes'] = idx.decompressed_size_bytes
+    if idx.compression_ratio is not None:
+        data['compression_ratio'] = idx.compression_ratio
+
+    # Anomaly info (if analysis was performed)
+    if idx.analysis_performed:
+        data['anomaly_count'] = len(idx.anomalies) if idx.anomalies else 0
+        data['anomaly_summary'] = idx.anomaly_summary
+        if idx.anomalies:
+            data['anomalies'] = [
+                {
+                    'start_line': a.start_line,
+                    'end_line': a.end_line,
+                    'start_offset': a.start_offset,
+                    'end_offset': a.end_offset,
+                    'severity': a.severity,
+                    'category': a.category,
+                    'description': a.description,
+                    'detector': a.detector,
+                }
+                for a in idx.anomalies
+            ]
+
+    return data
 
 
 def _output_human_readable(result, analyze: bool):
@@ -223,15 +283,43 @@ def _output_human_readable(result, analyze: bool):
         size_info = human_readable_size(idx.source_size_bytes)
         click.echo(f'  {idx.source_path}: {line_info}, {size_info}')
 
-        if analyze and idx.anomalies:
-            # Show anomaly summary
-            if idx.anomaly_summary:
-                summary_parts = [f'{count} {cat}' for cat, count in idx.anomaly_summary.items()]
-                click.echo(f'    Anomalies: {", ".join(summary_parts)}')
+        # Show line statistics when analysis was performed
+        if idx.analysis_performed:
+            # Lines info with empty count
+            if idx.line_count is not None and idx.empty_line_count is not None:
+                click.echo(f'    Lines: {idx.line_count:,} total, {idx.empty_line_count:,} empty')
+
+            # Line ending
+            if idx.line_ending:
+                click.echo(f'    Line ending: {idx.line_ending}')
+
+            # Line length statistics
+            if idx.line_length_max is not None:
+                click.echo(
+                    f'    Line length: max={idx.line_length_max}, '
+                    f'avg={idx.line_length_avg:.1f}, '
+                    f'median={idx.line_length_median:.1f}, '
+                    f'p95={idx.line_length_p95:.1f}, '
+                    f'p99={idx.line_length_p99:.1f}, '
+                    f'stddev={idx.line_length_stddev:.1f}'
+                )
+
+                # Longest line location
+                if idx.line_length_max_line_number is not None:
+                    click.echo(
+                        f'    Longest line: line {idx.line_length_max_line_number}, '
+                        f'offset {idx.line_length_max_byte_offset}'
+                    )
+
+            # Anomalies
+            if idx.anomalies:
+                if idx.anomaly_summary:
+                    summary_parts = [f'{count} {cat}' for cat, count in idx.anomaly_summary.items()]
+                    click.echo(f'    Anomalies: {", ".join(summary_parts)}')
+                else:
+                    click.echo(f'    Anomalies: {len(idx.anomalies)}')
             else:
-                click.echo(f'    Anomalies: {len(idx.anomalies)}')
-        elif analyze:
-            click.echo('    Anomalies: none')
+                click.echo('    Anomalies: none')
 
     # Show skipped files count
     if result.skipped:

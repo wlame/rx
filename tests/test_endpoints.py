@@ -926,3 +926,55 @@ class TestIndexEndpoint:
         response = client.post('/v1/index', json={'path': temp_test_file, 'threshold': 100})
         assert response.status_code == 400
         assert 'below threshold' in response.json()['detail']
+
+    def test_index_endpoint_with_analyze_flag(self, client, large_test_file):
+        """Test that POST /v1/index accepts analyze=true parameter.
+
+        The analyze flag enables full analysis with anomaly detection.
+        """
+        response = client.post(
+            '/v1/index',
+            json={'path': large_test_file, 'force': True, 'threshold': 1, 'analyze': True},
+        )
+
+        # Should return 200 with task info
+        assert response.status_code == 200
+        data = response.json()
+
+        # Verify response structure
+        assert 'task_id' in data
+        assert 'status' in data
+        assert data['status'] in ['queued', 'running']
+        assert 'path' in data
+        assert isinstance(data['path'], str)
+
+    def test_index_endpoint_analyze_false_by_default(self, client, large_test_file):
+        """Test that analyze defaults to false when not specified."""
+        response = client.post('/v1/index', json={'path': large_test_file, 'force': True, 'threshold': 1})
+
+        assert response.status_code == 200
+        data = response.json()
+        assert 'task_id' in data
+
+    @pytest.fixture
+    def file_with_errors(self, temp_dir):
+        """Create a test file with error patterns for anomaly detection."""
+        lines = []
+        for i in range(1, 5001):
+            if i == 100:
+                lines.append('ERROR: Something went wrong\n')
+            elif i == 500:
+                lines.append('Traceback (most recent call last):\n')
+                lines.append('  File "test.py", line 10, in <module>\n')
+                lines.append('    raise ValueError("test error")\n')
+                lines.append('ValueError: test error\n')
+            elif i == 1000:
+                lines.append('WARNING: Deprecated function called\n')
+            else:
+                lines.append(f'Line {i:06d}: normal log content here with padding\n')
+        temp_path = os.path.join(temp_dir, 'file_with_errors.txt')
+        with open(temp_path, 'w') as f:
+            f.writelines(lines)
+        yield temp_path
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)

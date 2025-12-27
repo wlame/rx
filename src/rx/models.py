@@ -1531,6 +1531,7 @@ class IndexRequest(BaseModel):
 
     path: str = Field(..., description='Path to file to index')
     force: bool = Field(default=False, description='Force rebuild even if valid index exists')
+    analyze: bool = Field(default=False, description='Run full analysis with anomaly detection')
     threshold: int | None = Field(None, description='Minimum file size in MB to index (default: from env)')
 
 
