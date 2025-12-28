@@ -277,6 +277,17 @@ class UnifiedFileIndex(BaseModel):
     )
     anomaly_summary: dict[str, int] | None = Field(default=None, description='Count of anomalies by category')
 
+    # Prefix pattern detection (only when analysis_performed=True)
+    prefix_pattern: str | None = Field(
+        default=None,
+        description='Dominant prefix pattern as masked tokens (e.g., "<DATE> <TIME> <COMPONENT>")',
+    )
+    prefix_regex: str | None = Field(default=None, description='Regex pattern to match the prefix')
+    prefix_coverage: float | None = Field(
+        default=None, description='Fraction of lines matching the prefix pattern (0.0-1.0)'
+    )
+    prefix_length: int | None = Field(default=None, description='Typical prefix length in characters')
+
     model_config = ConfigDict(extra='ignore')
 
     def get_line_count(self) -> int | None:
@@ -901,6 +912,53 @@ class AnomalyRangeResult(BaseModel):
     category: str = Field(..., description="Anomaly category (e.g., 'traceback', 'error', 'format')")
     description: str = Field(..., description='Human-readable description of the anomaly')
     detector: str = Field(..., description='Name of detector that found the anomaly')
+
+
+# =============================================================================
+# Detector Metadata Models
+# =============================================================================
+
+
+class SeverityRange(BaseModel):
+    """Severity range for a detector."""
+
+    min: float = Field(..., ge=0.0, le=1.0, description='Minimum severity score')
+    max: float = Field(..., ge=0.0, le=1.0, description='Maximum severity score')
+
+
+class DetectorInfo(BaseModel):
+    """Metadata about an anomaly detector."""
+
+    name: str = Field(..., description='Unique detector identifier')
+    category: str = Field(..., description='Anomaly category this detector produces')
+    description: str = Field(..., description='Human-readable description of what the detector finds')
+    severity_range: SeverityRange = Field(..., description='Range of severity scores this detector produces')
+    examples: list[str] = Field(default_factory=list, description='Example patterns or keywords detected')
+
+
+class CategoryInfo(BaseModel):
+    """Metadata about an anomaly category."""
+
+    name: str = Field(..., description='Category identifier')
+    description: str = Field(..., description='Human-readable description of the category')
+    detectors: list[str] = Field(default_factory=list, description='List of detector names in this category')
+
+
+class SeverityScaleLevel(BaseModel):
+    """A level in the severity scale."""
+
+    min: float = Field(..., ge=0.0, le=1.0, description='Minimum severity for this level')
+    max: float = Field(..., ge=0.0, le=1.0, description='Maximum severity for this level')
+    label: str = Field(..., description='Human-readable label (e.g., "critical", "high")')
+    description: str = Field(..., description='Description of what this severity level means')
+
+
+class DetectorsResponse(BaseModel):
+    """Response model for GET /v1/detectors endpoint."""
+
+    detectors: list[DetectorInfo] = Field(..., description='List of all available anomaly detectors')
+    categories: list[CategoryInfo] = Field(..., description='List of anomaly categories')
+    severity_scale: list[SeverityScaleLevel] = Field(..., description='Severity scale reference')
 
 
 class FileAnalysisResult(BaseModel):

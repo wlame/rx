@@ -1,12 +1,17 @@
 """Timestamp gap detector."""
 
+import logging
 import os
 import re
 from datetime import datetime
 
-from .base import AnomalyDetector, LineContext
+from .base import AnomalyDetector, LineContext, register_detector
 
 
+logger = logging.getLogger(__name__)
+
+
+@register_detector
 class TimestampGapDetector(AnomalyDetector):
     """Detects unusual gaps in timestamps between log lines.
 
@@ -38,12 +43,20 @@ class TimestampGapDetector(AnomalyDetector):
     DEFAULT_MAX_LINES_BETWEEN_TIMESTAMPS = 500  # Ignore gap if too many lines apart
     DEFAULT_FORMAT_LOCK_THRESHOLD = 50  # Lock to format after N consistent matches
 
-    def __init__(self):
+    def __init__(self, filepath: str | None = None):
+        """Initialize the detector.
+
+        Args:
+            filepath: Path to file being analyzed (for logging context).
+        """
+        self._filepath = filepath
         self._last_timestamp: float | None = None
         self._last_timestamp_line: int = 0  # Line number of last timestamp
         self._timestamp_format: int | None = None  # Which pattern matched
         self._format_counts: dict[int, int] = {}  # Count per format
         self._locked_format: int | None = None  # Locked format after threshold
+        self._detection_count = 0
+        self._max_gap_detected = 0.0
 
         # Load config from env vars
         self._max_words = int(os.environ.get('RX_TIMESTAMP_MAX_WORDS', str(self.DEFAULT_MAX_WORDS_TO_SEARCH)))
@@ -53,6 +66,7 @@ class TimestampGapDetector(AnomalyDetector):
         self._format_lock_threshold = int(
             os.environ.get('RX_TIMESTAMP_FORMAT_LOCK_THRESHOLD', str(self.DEFAULT_FORMAT_LOCK_THRESHOLD))
         )
+        logger.debug(f'[timestamp_gap] Initialized for file: {filepath}')
 
     @property
     def name(self) -> str:
@@ -61,6 +75,22 @@ class TimestampGapDetector(AnomalyDetector):
     @property
     def category(self) -> str:
         return 'timing'
+
+    @property
+    def detector_description(self) -> str:
+        return 'Detects unusual gaps in timestamps between consecutive log lines (>5 minutes)'
+
+    @property
+    def severity_min(self) -> float:
+        return 0.3
+
+    @property
+    def severity_max(self) -> float:
+        return 0.8
+
+    @property
+    def examples(self) -> list[str]:
+        return ['5+ minute gap', '1 hour gap', 'Service restart', 'Missing log entries']
 
     def _get_line_prefix(self, line: str) -> str:
         """Extract the first N words from a line for timestamp searching.
@@ -142,6 +172,11 @@ class TimestampGapDetector(AnomalyDetector):
         if self._locked_format is None:
             if self._format_counts[fmt_idx] >= self._format_lock_threshold:
                 self._locked_format = fmt_idx
+                format_names = ['ISO8601', 'common_log', 'unix_timestamp', 'HH:MM:SS']
+                logger.debug(
+                    f'[timestamp_gap] {self._filepath}: Locked to timestamp format {format_names[fmt_idx]} '
+                    f'after {self._format_counts[fmt_idx]} matches'
+                )
 
     def check_line(self, ctx: LineContext) -> float | None:
         timestamp, fmt_idx = self._parse_timestamp(ctx.line)
@@ -185,6 +220,22 @@ class TimestampGapDetector(AnomalyDetector):
         if gap >= self.MIN_GAP_SECONDS:
             # Severity scales with gap size, max at 1 hour
             severity = min(0.3 + (gap / self.SEVERITY_SCALE) * 0.5, 0.8)
+            self._detection_count += 1
+            if gap > self._max_gap_detected:
+                self._max_gap_detected = gap
+
+            # Format gap for human readability
+            if gap >= 3600:
+                gap_str = f'{gap / 3600:.1f}h'
+            elif gap >= 60:
+                gap_str = f'{gap / 60:.1f}m'
+            else:
+                gap_str = f'{gap:.0f}s'
+
+            logger.debug(
+                f'[timestamp_gap] {self._filepath}: Detected timestamp gap of {gap_str} '
+                f'(severity={severity:.2f}) at line {ctx.line_number}'
+            )
             return severity
 
         return None

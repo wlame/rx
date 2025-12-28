@@ -1,6 +1,7 @@
 """CLI command for file indexing and analysis."""
 
 import json
+import logging
 import os
 import sys
 
@@ -8,6 +9,27 @@ import click
 
 from rx.indexer import FileIndexer
 from rx.unified_index import delete_index, load_index
+
+
+def _setup_logging():
+    """Setup logging based on RX_LOG_LEVEL environment variable."""
+    log_level_str = os.environ.get('RX_LOG_LEVEL', 'WARNING').upper()
+    log_level = getattr(logging, log_level_str, logging.WARNING)
+
+    # Configure root logger for rx modules
+    logging.basicConfig(
+        level=log_level,
+        format='%(asctime)s %(name)s [%(levelname)s] %(message)s',
+        datefmt='%H:%M:%S',
+        stream=sys.stderr,
+    )
+
+    # Set level for rx modules specifically
+    logging.getLogger('rx').setLevel(log_level)
+
+    # Suppress drain3 INFO messages unless DEBUG is requested
+    if log_level > logging.DEBUG:
+        logging.getLogger('drain3').setLevel(logging.WARNING)
 
 
 def human_readable_size(size_bytes: int) -> str:
@@ -68,7 +90,14 @@ def index_command(
     Index behavior:
         Without --analyze: Only indexes files >= 50MB (or threshold)
         With --analyze: Indexes ALL files with full analysis
+
+    \b
+    Environment variables:
+        RX_LOG_LEVEL: Set logging level (DEBUG, INFO, WARNING, ERROR)
     """
+    # Setup logging first
+    _setup_logging()
+
     # Handle info and delete modes with existing logic
     if info or delete:
         _handle_info_or_delete(paths, info, delete, json_output, recursive)

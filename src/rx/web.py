@@ -23,6 +23,11 @@ from rx import prometheus as prom
 from rx import trace as trace_module
 from rx import unified_index
 from rx.__version__ import __version__
+from rx.analyze.detectors.base import (
+    get_category_info_list,
+    get_detector_info_list,
+    get_severity_scale,
+)
 from rx.compressed_index import get_decompressed_content_at_line, get_or_build_compressed_index
 from rx.compression import CompressionFormat, detect_compression, is_compressed
 from rx.file_utils import get_context, get_context_by_lines, is_text_file, validate_file
@@ -35,12 +40,17 @@ from rx.hooks import (
 )
 from rx.indexer import FileIndexer
 from rx.models import (
+    CategoryInfo,
     ComplexityResponse,
     CompressRequest,
+    DetectorInfo,
+    DetectorsResponse,
     IndexRequest,
     Match,
     RequestInfo,
     SamplesResponse,
+    SeverityRange,
+    SeverityScaleLevel,
     TaskResponse,
     TaskStatusResponse,
     TraceCompletePayload,
@@ -647,6 +657,88 @@ async def complexity(
         prom.record_error('internal_error')
         prom.record_http_response('GET', '/v1/complexity', 500)
         raise HTTPException(status_code=500, detail=f'Internal error: {e!s}')
+
+
+@app.get(
+    '/v1/detectors',
+    tags=['Analysis'],
+    summary='List all available anomaly detectors',
+    response_model=DetectorsResponse,
+    responses={
+        200: {'description': 'Detector list retrieved successfully'},
+    },
+)
+async def detectors() -> DetectorsResponse:
+    """
+    Get metadata about all available anomaly detectors.
+
+    This endpoint provides information for frontends to display detector
+    capabilities, severity ranges, and categorization.
+
+    **Returns:**
+    - **detectors**: List of all registered anomaly detectors with:
+      - name: Unique detector identifier
+      - category: Anomaly category (error, warning, traceback, format, security, timing, multiline)
+      - description: Human-readable description of what the detector finds
+      - severity_range: Min/max severity scores this detector produces (0.0-1.0)
+      - examples: Example patterns or keywords detected
+
+    - **categories**: List of anomaly categories with:
+      - name: Category identifier
+      - description: What this category represents
+      - detectors: List of detector names in this category
+
+    - **severity_scale**: Reference for interpreting severity scores:
+      - 0.0-0.4: low - Minor deviations, informational
+      - 0.4-0.6: medium - Warnings, format issues
+      - 0.6-0.8: high - Errors, crashes
+      - 0.8-1.0: critical - Fatal errors, exposed secrets
+
+    **Note:** New detectors added to the codebase are automatically included
+    in this response via the @register_detector decorator.
+    """
+    # Import all detectors to ensure they're registered
+    # This import triggers the @register_detector decorators
+    import rx.analyze.detectors  # noqa: F401
+
+    # Build response from registry
+    detector_list = [
+        DetectorInfo(
+            name=d['name'],
+            category=d['category'],
+            description=d['description'],
+            severity_range=SeverityRange(min=d['severity_range']['min'], max=d['severity_range']['max']),
+            examples=d['examples'],
+        )
+        for d in get_detector_info_list()
+    ]
+
+    category_list = [
+        CategoryInfo(
+            name=c['name'],
+            description=c['description'],
+            detectors=c['detectors'],
+        )
+        for c in get_category_info_list()
+    ]
+
+    severity_scale_list = [
+        SeverityScaleLevel(
+            min=s['min'],
+            max=s['max'],
+            label=s['label'],
+            description=s['description'],
+        )
+        for s in get_severity_scale()
+    ]
+
+    prom.record_http_response('GET', '/v1/detectors', 200)
+
+    return DetectorsResponse(
+        detectors=detector_list,
+        categories=category_list,
+        severity_scale=severity_scale_list,
+    )
 
 
 @app.get(

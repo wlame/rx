@@ -1257,6 +1257,12 @@ class FileAnalysisState:
     anomalies: list[AnomalyRange] = field(default_factory=list)
     anomaly_summary: dict[str, int] = field(default_factory=dict)  # category -> count
 
+    # Prefix pattern detection (only populated when detect_anomalies=True)
+    prefix_pattern: str | None = None  # Masked tokens: "<DATE> <TIME> <COMPONENT>"
+    prefix_regex: str | None = None  # Regex to match the pattern
+    prefix_coverage: float | None = None  # Fraction of lines matching (0.0-1.0)
+    prefix_length: int | None = None  # Typical prefix length in characters
+
     # Additional metrics can be added by plugins
     custom_metrics: dict[str, Any] = field(default_factory=dict)
 
@@ -1297,20 +1303,60 @@ class FileAnalyzer:
         """
         self.use_index_cache = use_index_cache
         self.detect_anomalies = detect_anomalies
-        self.anomaly_detectors = anomaly_detectors if anomaly_detectors is not None else self._default_detectors()
+        self._custom_detectors = anomaly_detectors  # Store custom detectors if provided
+        self.anomaly_detectors: list[AnomalyDetector] = []  # Will be set per-file
 
-    def _default_detectors(self) -> list[AnomalyDetector]:
-        """Return the default set of anomaly detectors."""
+    def _create_detectors_for_file(self, filepath: str) -> list[AnomalyDetector]:
+        """Create anomaly detectors for a specific file.
+
+        Args:
+            filepath: Path to the file being analyzed.
+
+        Returns:
+            List of detector instances configured for this file.
+        """
+        if self._custom_detectors is not None:
+            return self._custom_detectors  # Use custom detectors as-is
+
+        # Import from rx.analyze.detectors to get the versions with logging
+        from rx.analyze.detectors import (
+            ErrorKeywordDetector as EKD,
+        )
+        from rx.analyze.detectors import (
+            FormatDeviationDetector as FDD,
+        )
+        from rx.analyze.detectors import (
+            HighEntropyDetector as HED,
+        )
+        from rx.analyze.detectors import (
+            IndentationBlockDetector as IBD,
+        )
+        from rx.analyze.detectors import (
+            JsonDumpDetector as JDD,
+        )
+        from rx.analyze.detectors import (
+            LineLengthSpikeDetector as LLSD,
+        )
+        from rx.analyze.detectors import (
+            TimestampGapDetector as TGD,
+        )
+        from rx.analyze.detectors import (
+            TracebackDetector as TBD,
+        )
+        from rx.analyze.detectors import (
+            WarningKeywordDetector as WKD,
+        )
+
         return [
-            TracebackDetector(),
-            ErrorKeywordDetector(),
-            WarningKeywordDetector(),
-            LineLengthSpikeDetector(),
-            IndentationBlockDetector(),
-            TimestampGapDetector(),
-            HighEntropyDetector(),
-            JsonDumpDetector(),
-            FormatDeviationDetector(),
+            TBD(filepath=filepath),
+            EKD(filepath=filepath),
+            WKD(filepath=filepath),
+            LLSD(filepath=filepath),
+            IBD(filepath=filepath),
+            TGD(filepath=filepath),
+            HED(filepath=filepath),
+            JDD(filepath=filepath),
+            FDD(filepath=filepath),
         ]
 
     def file_hook(self, filepath: str, result: FileAnalysisState) -> None:
@@ -1567,6 +1613,11 @@ class FileAnalyzer:
                 for a in (result.anomalies or [])
             ],
             anomaly_summary=result.anomaly_summary or {},
+            # Prefix pattern detection
+            prefix_pattern=result.prefix_pattern,
+            prefix_regex=result.prefix_regex,
+            prefix_coverage=result.prefix_coverage,
+            prefix_length=result.prefix_length,
         )
 
     def _add_index_info(self, filepath: str, result: FileAnalysisState):
@@ -1737,10 +1788,10 @@ class FileAnalyzer:
         For large text files with valid cached indexes, analysis data is
         loaded from cache for better performance.
         """
-        # STEP 1: Try unified index cache first
+        # STEP 1: Try unified index cache first (only if use_index_cache is True)
         from rx.unified_index import load_index
 
-        cached_index = load_index(filepath)
+        cached_index = load_index(filepath) if self.use_index_cache else None
         if cached_index:
             # Check if anomalies were requested but cache has none
             cache_has_anomalies = bool(cached_index.anomalies)
@@ -1761,8 +1812,8 @@ class FileAnalyzer:
                     logger.warning(f'Post hook failed: {e}')
                 return result
 
-        # STEP 2: Try old index cache
-        cached_result = self._try_load_from_cache(filepath, file_id)
+        # STEP 2: Try old index cache (only if use_index_cache is True)
+        cached_result = self._try_load_from_cache(filepath, file_id) if self.use_index_cache else None
         if cached_result is not None:
             # Check if anomalies were requested but cache has none
             if self.detect_anomalies and not cached_result.anomalies:
@@ -1825,29 +1876,33 @@ class FileAnalyzer:
                     except Exception as e:
                         logger.debug(f'Could not get seekable zstd info: {e}')
 
-            # STEP 5: Run file-level hooks
+            # STEP 5: Create detectors for this file (with filepath for logging)
+            if self.detect_anomalies:
+                self.anomaly_detectors = self._create_detectors_for_file(filepath)
+
+            # STEP 6: Run file-level hooks
             try:
                 self.file_hook(filepath, result)
             except Exception as e:
                 logger.warning(f'File hook failed for {filepath}: {e}')
 
-            # STEP 6: Analyze content
+            # STEP 7: Analyze content
             if result.is_text:
                 self._analyze_text_file(filepath, result)
             elif result.is_compressed:
                 # NEW: Handle compressed files
                 self._analyze_compressed_file(filepath, result)
 
-            # STEP 7: Add index information (NEW)
+            # STEP 8: Add index information (NEW)
             self._add_index_info(filepath, result)
 
-            # STEP 8: Run post-processing hooks
+            # STEP 9: Run post-processing hooks
             try:
                 self.post_hook(result)
             except Exception as e:
                 logger.warning(f'Post hook failed for {filepath}: {e}')
 
-            # STEP 9: Save to unified index cache
+            # STEP 10: Save to unified index cache
             try:
                 unified_index = self._state_to_index(result, filepath)
                 from rx.unified_index import save_index
@@ -1875,19 +1930,11 @@ class FileAnalyzer:
         Memory optimizations for large files:
         - Uses BoundedAnomalyHeap to limit anomalies to 100k entries max
         - Uses SparseLineOffsets to only track offsets for anomaly lines
-        - Uses parallel rg prescan for fast keyword detection on large files
-        - For very large files (>1GB): uses fast path with wc -l and prescan only
+        - Uses parallel rg prescan for fast keyword detection on large files (>100MB)
         - Periodic pruning based on anomaly density
         """
         try:
             file_size = result.size_bytes
-            VERY_LARGE_FILE_THRESHOLD = 1 * 1024 * 1024 * 1024  # 1GB
-
-            # For very large files, use fast path that avoids Python line iteration
-            if file_size >= VERY_LARGE_FILE_THRESHOLD and self.detect_anomalies:
-                logger.info(f'Using fast path for very large file ({file_size / (1024**3):.1f} GB)')
-                self._analyze_very_large_file_fast(filepath, result)
-                return
 
             # Sample first chunk for line ending detection (up to 10MB)
             SAMPLE_SIZE = 10 * 1024 * 1024
@@ -1939,6 +1986,32 @@ class FileAnalyzer:
                 anomaly_heap = BoundedAnomalyHeap(max_size=100_000)
                 # Use sparse line offsets instead of storing all offsets
                 line_offsets = SparseLineOffsets(window_size=100)
+
+                # Extract prefix pattern using Drain3 (for prefix deviation detection)
+                try:
+                    from rx.analyze.prefix_pattern import PrefixPatternExtractor
+
+                    prefix_extractor = PrefixPatternExtractor()
+                    prefix_result = prefix_extractor.extract_from_file(filepath)
+                    if prefix_result and prefix_result.coverage >= 0.90:
+                        result.prefix_pattern = prefix_result.pattern
+                        result.prefix_regex = prefix_result.regex
+                        result.prefix_coverage = prefix_result.coverage
+                        result.prefix_length = prefix_result.prefix_length
+                        logger.info(
+                            f'Prefix pattern detected: {prefix_result.pattern} (coverage: {prefix_result.coverage:.1%})'
+                        )
+
+                        # Add PrefixDeviationDetector to detectors list
+                        from rx.analyze.detectors.prefix_deviation import PrefixDeviationDetector
+
+                        prefix_detector = PrefixDeviationDetector(
+                            prefix_regex=prefix_result.regex,
+                            prefix_length=prefix_result.prefix_length,
+                        )
+                        self.anomaly_detectors.append(prefix_detector)
+                except Exception as e:
+                    logger.debug(f'Prefix pattern extraction failed: {e}')
 
                 # Separate detectors: keyword-based (can use rg) vs context-based (need line-by-line)
                 # Collect all keyword patterns for combined rg prescan
@@ -2152,178 +2225,6 @@ class FileAnalyzer:
 
         except Exception as e:
             logger.error(f'Failed to analyze text content of {filepath}: {e}')
-
-    def _analyze_very_large_file_fast(self, filepath: str, result: FileAnalysisState):
-        """Fast path for very large files (>1GB) using wc -l and rg prescan.
-
-        This avoids Python line iteration which is slow for multi-GB files.
-        Instead, it uses:
-        - `wc -l` for fast line counting
-        - `rg_prescan_all_detectors` for parallel anomaly detection
-
-        Line statistics (avg, median, percentiles) are not computed in fast path.
-
-        Args:
-            filepath: Path to the file to analyze
-            result: FileAnalysisState to populate with results
-        """
-        import subprocess
-
-        from rx.analyze.prescan import rg_prescan_all_detectors
-
-        try:
-            # Get line count using wc -l (very fast, even for huge files)
-            wc_result = subprocess.run(
-                ['wc', '-l', filepath],
-                capture_output=True,
-                text=True,
-                timeout=300,
-            )
-            if wc_result.returncode == 0:
-                # Output format: "  12345 /path/to/file"
-                line_count_str = wc_result.stdout.strip().split()[0]
-                result.line_count = int(line_count_str)
-            else:
-                logger.warning(f'wc -l failed for {filepath}, line count unavailable')
-                result.line_count = None
-
-            # Detect line ending from first chunk
-            SAMPLE_SIZE = 10 * 1024 * 1024  # 10MB
-            with open(filepath, 'rb') as f:
-                sample = f.read(SAMPLE_SIZE)
-            result.line_ending = self._detect_line_ending(sample)
-
-            # Set placeholder values for line statistics (not computed in fast path)
-            result.empty_line_count = None
-            result.line_length_max = None
-            result.line_length_avg = None
-            result.line_length_median = None
-            result.line_length_p95 = None
-            result.line_length_p99 = None
-            result.line_length_stddev = None
-            result.line_length_max_line_number = None
-            result.line_length_max_byte_offset = None
-
-            # Run parallel prescan for anomaly detection
-            if self.detect_anomalies and self.anomaly_detectors:
-                matches_by_detector = rg_prescan_all_detectors(filepath, self.anomaly_detectors)
-
-                if matches_by_detector:
-                    # Convert prescan matches to AnomalyRange objects
-                    anomalies: list[AnomalyRange] = []
-
-                    for detector_name, matches in matches_by_detector.items():
-                        # Find the detector to get category info
-                        detector = None
-                        for d in self.anomaly_detectors:
-                            if d.name == detector_name:
-                                detector = d
-                                break
-
-                        if not detector:
-                            continue
-
-                        # Group adjacent matches into ranges
-                        if not matches:
-                            continue
-
-                        # Sort by byte_offset (more reliable than line_num which may be -1)
-                        sorted_matches = sorted(matches, key=lambda m: m.byte_offset)
-
-                        # Get anomaly line limit from env var (default 1000)
-                        anomaly_line_limit = int(os.environ.get('RX_ANOMALY_LINE_LIMIT', '1000'))
-
-                        # When line numbers are unknown (-1), don't merge matches
-                        # Each match becomes its own anomaly range
-                        has_line_numbers = all(m.line_num != -1 for m in sorted_matches)
-
-                        if not has_line_numbers:
-                            # No merging when line numbers are unknown
-                            for match in sorted_matches:
-                                description = match.line_text[:200] if match.line_text else ''
-                                anomalies.append(
-                                    AnomalyRange(
-                                        start_line=match.line_num,
-                                        end_line=match.line_num,
-                                        start_offset=match.byte_offset,
-                                        end_offset=match.byte_offset,
-                                        severity=match.severity,
-                                        category=detector.category,
-                                        description=description,
-                                        detector=detector_name,
-                                    )
-                                )
-                        else:
-                            # Merge adjacent lines (within 2 lines gap), but cap at anomaly_line_limit
-                            i = 0
-                            while i < len(sorted_matches):
-                                start_match = sorted_matches[i]
-                                end_match = start_match
-                                max_severity = start_match.severity
-                                lines_text = [start_match.line_text]
-
-                                j = i + 1
-                                while j < len(sorted_matches):
-                                    next_match = sorted_matches[j]
-                                    # Check adjacency AND line limit
-                                    lines_in_range = next_match.line_num - start_match.line_num + 1
-                                    if (
-                                        next_match.line_num <= end_match.line_num + 2
-                                        and lines_in_range <= anomaly_line_limit
-                                    ):
-                                        end_match = next_match
-                                        max_severity = max(max_severity, next_match.severity)
-                                        lines_text.append(next_match.line_text)
-                                        j += 1
-                                    else:
-                                        break
-
-                                # Create description from first line
-                                description = lines_text[0][:200] if lines_text else ''
-
-                                anomalies.append(
-                                    AnomalyRange(
-                                        start_line=start_match.line_num,
-                                        end_line=end_match.line_num,
-                                        start_offset=start_match.byte_offset,
-                                        end_offset=end_match.byte_offset,
-                                        severity=max_severity,
-                                        category=detector.category,
-                                        description=description,
-                                        detector=detector_name,
-                                    )
-                                )
-
-                                i = j
-
-                    # Limit total anomalies
-                    if len(anomalies) > 10000:
-                        # Sort by severity and keep top 10k
-                        anomalies.sort(key=lambda a: a.severity, reverse=True)
-                        anomalies = anomalies[:10000]
-                        # Re-sort by line number
-                        anomalies.sort(key=lambda a: a.start_line)
-
-                    result.anomalies = anomalies
-
-                    # Build anomaly summary
-                    result.anomaly_summary = {}
-                    for anomaly in anomalies:
-                        category = anomaly.category
-                        result.anomaly_summary[category] = result.anomaly_summary.get(category, 0) + 1
-
-                    logger.info(f'Fast path analysis complete: {result.line_count:,} lines, {len(anomalies)} anomalies')
-                else:
-                    result.anomalies = []
-                    result.anomaly_summary = {}
-            else:
-                result.anomalies = []
-                result.anomaly_summary = {}
-
-        except Exception as e:
-            logger.error(f'Fast path analysis failed for {filepath}: {e}')
-            # Fall back to regular analysis
-            raise
 
     def _merge_and_filter_anomalies(
         self,

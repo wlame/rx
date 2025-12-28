@@ -334,7 +334,7 @@ class FileIndexer:
         try:
             from rx import compressed_index
 
-            comp_idx = compressed_index.load_index(filepath)
+            comp_idx = compressed_index.load_compressed_index(filepath)
             if comp_idx:
                 idx.line_index = comp_idx.line_index
                 idx.decompressed_size_bytes = comp_idx.decompressed_size_bytes

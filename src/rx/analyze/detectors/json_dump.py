@@ -1,10 +1,15 @@
 """JSON dump detector."""
 
+import logging
 import re
 
-from .base import AnomalyDetector, LineContext
+from .base import AnomalyDetector, LineContext, register_detector
 
 
+logger = logging.getLogger(__name__)
+
+
+@register_detector
 class JsonDumpDetector(AnomalyDetector):
     """Detects embedded JSON objects in log lines.
 
@@ -16,6 +21,17 @@ class JsonDumpDetector(AnomalyDetector):
     - Multiple consecutive lines that look like JSON
     - Minimum line length of 100 characters
     """
+
+    def __init__(self, filepath: str | None = None):
+        """Initialize the detector.
+
+        Args:
+            filepath: Path to file being analyzed (for logging context).
+        """
+        self._filepath = filepath
+        self._detection_count = 0
+        self._merge_count = 0
+        logger.debug(f'[json_dump] Initialized for file: {filepath}')
 
     # Patterns for JSON-like content - require proper JSON syntax
     # These patterns look for actual JSON structure, not just brackets
@@ -50,6 +66,22 @@ class JsonDumpDetector(AnomalyDetector):
     def category(self) -> str:
         return 'format'
 
+    @property
+    def detector_description(self) -> str:
+        return 'Detects large embedded JSON objects dumped into log lines (>10 lines, >100 chars)'
+
+    @property
+    def severity_min(self) -> float:
+        return 0.3
+
+    @property
+    def severity_max(self) -> float:
+        return 0.4
+
+    @property
+    def examples(self) -> list[str]:
+        return ['{"key": "value", ...}', 'Serialized request/response', 'Debug object dump']
+
     def check_line(self, ctx: LineContext) -> float | None:
         line = ctx.line.rstrip()
 
@@ -74,11 +106,18 @@ class JsonDumpDetector(AnomalyDetector):
 
                 # Longer JSON dumps get slightly higher severity
                 if len(line) > 500:
-                    return 0.4
+                    severity = 0.4
                 elif len(line) > 200:
-                    return 0.35
+                    severity = 0.35
                 else:
-                    return 0.3
+                    severity = 0.3
+
+                self._detection_count += 1
+                logger.debug(
+                    f'[json_dump] {self._filepath}: Detected JSON dump (len={len(line)}, '
+                    f'json_lines={json_like_lines}, severity={severity:.2f}) at line {ctx.line_number}'
+                )
+                return severity
 
         return None
 
@@ -126,7 +165,11 @@ class JsonDumpDetector(AnomalyDetector):
         if not line:
             return False
 
-        return self._is_json_like_line(line)
+        if self._is_json_like_line(line):
+            self._merge_count += 1
+            logger.debug(f'[json_dump] {self._filepath}: Merging JSON line at {ctx.line_number}')
+            return True
+        return False
 
     def get_description(self, lines: list[str]) -> str:
         total_chars = sum(len(line) for line in lines)

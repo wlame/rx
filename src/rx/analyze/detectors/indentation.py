@@ -1,10 +1,27 @@
 """Indentation block detector."""
 
-from .base import AnomalyDetector, LineContext
+import logging
+
+from .base import AnomalyDetector, LineContext, register_detector
 
 
+logger = logging.getLogger(__name__)
+
+
+@register_detector
 class IndentationBlockDetector(AnomalyDetector):
     """Detects unusual indentation patterns that may indicate embedded data."""
+
+    def __init__(self, filepath: str | None = None):
+        """Initialize the detector.
+
+        Args:
+            filepath: Path to file being analyzed (for logging context).
+        """
+        self._filepath = filepath
+        self._detection_count = 0
+        self._merge_count = 0
+        logger.debug(f'[indentation_block] Initialized for file: {filepath}')
 
     # Minimum lines to consider a block
     MIN_BLOCK_SIZE = 3
@@ -18,6 +35,22 @@ class IndentationBlockDetector(AnomalyDetector):
     @property
     def category(self) -> str:
         return 'multiline'
+
+    @property
+    def detector_description(self) -> str:
+        return 'Detects blocks of consistently indented lines that may indicate embedded data or configurations'
+
+    @property
+    def severity_min(self) -> float:
+        return 0.4
+
+    @property
+    def severity_max(self) -> float:
+        return 0.4
+
+    @property
+    def examples(self) -> list[str]:
+        return ['3+ consecutive lines with 4+ spaces indentation']
 
     def _get_indentation(self, line: str) -> int:
         """Get the number of leading spaces (tabs count as 4 spaces)."""
@@ -52,6 +85,11 @@ class IndentationBlockDetector(AnomalyDetector):
 
             # If we have a consistent indentation block
             if indented_count >= self.MIN_BLOCK_SIZE - 1:
+                self._detection_count += 1
+                logger.debug(
+                    f'[indentation_block] {self._filepath}: Detected indented block (indent={indent}) '
+                    f'at line {ctx.line_number}: {line[:60]}{"..." if len(line) > 60 else ""}'
+                )
                 return 0.4
 
         return None
@@ -60,7 +98,11 @@ class IndentationBlockDetector(AnomalyDetector):
         line = ctx.line.rstrip()
         if not line.strip():
             return False
-        return self._get_indentation(line) >= self.MIN_INDENTATION
+        if self._get_indentation(line) >= self.MIN_INDENTATION:
+            self._merge_count += 1
+            logger.debug(f'[indentation_block] {self._filepath}: Merging indented line at {ctx.line_number}')
+            return True
+        return False
 
     def get_description(self, lines: list[str]) -> str:
         return f'Indented block ({len(lines)} lines)'

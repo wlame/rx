@@ -6,6 +6,150 @@ from collections import deque
 from dataclasses import dataclass
 
 
+# =============================================================================
+# Detector Registry
+# =============================================================================
+
+# Global registry of detector classes
+_detector_registry: dict[str, type['AnomalyDetector']] = {}
+
+# Category descriptions
+CATEGORY_DESCRIPTIONS: dict[str, str] = {
+    'error': 'Error-level log messages indicating failures or exceptions',
+    'warning': 'Warning-level log messages indicating potential issues',
+    'traceback': 'Stack traces and exception backtraces from various languages',
+    'format': 'Format anomalies such as unusually long lines, JSON dumps, or prefix deviations',
+    'security': 'Potential secrets, tokens, API keys, or other sensitive data',
+    'timing': 'Timestamp gaps or timing anomalies in log sequences',
+    'multiline': 'Multi-line content blocks such as indented data or configurations',
+}
+
+# Severity scale definition
+SEVERITY_SCALE = [
+    {
+        'min': 0.8,
+        'max': 1.0,
+        'label': 'critical',
+        'description': 'Critical issues: FATAL errors, exposed secrets, system panics',
+    },
+    {
+        'min': 0.6,
+        'max': 0.8,
+        'label': 'high',
+        'description': 'High severity: ERROR messages, crashes, large timestamp gaps',
+    },
+    {
+        'min': 0.4,
+        'max': 0.6,
+        'label': 'medium',
+        'description': 'Medium severity: warnings, format deviations, potential issues',
+    },
+    {'min': 0.0, 'max': 0.4, 'label': 'low', 'description': 'Low severity: minor deviations, informational anomalies'},
+]
+
+
+def register_detector(cls: type['AnomalyDetector']) -> type['AnomalyDetector']:
+    """Decorator to register a detector class in the global registry.
+
+    Usage:
+        @register_detector
+        class MyDetector(AnomalyDetector):
+            ...
+    """
+    # Create a temporary instance to get name
+    # We need to handle detectors that require filepath arg
+    try:
+        instance = cls(filepath=None)  # type: ignore
+    except TypeError:
+        try:
+            instance = cls()  # type: ignore
+        except TypeError:
+            # Can't instantiate, skip registration
+            return cls
+
+    _detector_registry[instance.name] = cls
+    return cls
+
+
+def get_registered_detectors() -> dict[str, type['AnomalyDetector']]:
+    """Get all registered detector classes."""
+    return _detector_registry.copy()
+
+
+def get_detector_info_list() -> list[dict]:
+    """Get metadata for all registered detectors.
+
+    Returns:
+        List of detector info dictionaries with name, category, description,
+        severity_range, and examples.
+    """
+    result = []
+    for name, cls in _detector_registry.items():
+        try:
+            instance = cls(filepath=None)  # type: ignore
+        except TypeError:
+            try:
+                instance = cls()  # type: ignore
+            except TypeError:
+                continue
+
+        info = {
+            'name': instance.name,
+            'category': instance.category,
+            'description': instance.detector_description,
+            'severity_range': {
+                'min': instance.severity_min,
+                'max': instance.severity_max,
+            },
+            'examples': instance.examples,
+        }
+        result.append(info)
+
+    # Sort by category then name
+    result.sort(key=lambda x: (x['category'], x['name']))
+    return result
+
+
+def get_category_info_list() -> list[dict]:
+    """Get metadata for all categories with their detectors.
+
+    Returns:
+        List of category info dictionaries.
+    """
+    # Collect detectors by category
+    categories: dict[str, list[str]] = {}
+    for name, cls in _detector_registry.items():
+        try:
+            instance = cls(filepath=None)  # type: ignore
+        except TypeError:
+            try:
+                instance = cls()  # type: ignore
+            except TypeError:
+                continue
+
+        cat = instance.category
+        if cat not in categories:
+            categories[cat] = []
+        categories[cat].append(instance.name)
+
+    result = []
+    for cat_name, detector_names in sorted(categories.items()):
+        result.append(
+            {
+                'name': cat_name,
+                'description': CATEGORY_DESCRIPTIONS.get(cat_name, f'Anomalies of type {cat_name}'),
+                'detectors': sorted(detector_names),
+            }
+        )
+
+    return result
+
+
+def get_severity_scale() -> list[dict]:
+    """Get the severity scale definition."""
+    return SEVERITY_SCALE.copy()
+
+
 @dataclass
 class AnomalyRange:
     """Represents a detected anomaly in a file.
@@ -46,6 +190,10 @@ class AnomalyDetector(ABC):
 
     Subclass this to create custom anomaly detectors. Each detector
     should focus on detecting a specific type of anomaly.
+
+    To register a detector for the /v1/detectors API, use the @register_detector
+    decorator and implement the metadata properties (detector_description,
+    severity_min, severity_max, examples).
     """
 
     @property
@@ -59,6 +207,38 @@ class AnomalyDetector(ABC):
     def category(self) -> str:
         """Anomaly category (e.g., 'traceback', 'error', 'format')."""
         pass
+
+    @property
+    def detector_description(self) -> str:
+        """Human-readable description of what the detector finds.
+
+        Override this to provide a meaningful description for the API.
+        """
+        return f'Detects {self.category} anomalies'
+
+    @property
+    def severity_min(self) -> float:
+        """Minimum severity score this detector produces.
+
+        Override this to specify the actual range.
+        """
+        return 0.0
+
+    @property
+    def severity_max(self) -> float:
+        """Maximum severity score this detector produces.
+
+        Override this to specify the actual range.
+        """
+        return 1.0
+
+    @property
+    def examples(self) -> list[str]:
+        """Example patterns or keywords this detector looks for.
+
+        Override this to provide examples for the API.
+        """
+        return []
 
     @abstractmethod
     def check_line(self, ctx: LineContext) -> float | None:

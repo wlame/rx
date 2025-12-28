@@ -1,18 +1,34 @@
 """High entropy detector for secrets and tokens."""
 
+import logging
 import math
 import re
 from collections import Counter
 
-from .base import AnomalyDetector, LineContext
+from .base import AnomalyDetector, LineContext, register_detector
 
 
+logger = logging.getLogger(__name__)
+
+
+@register_detector
 class HighEntropyDetector(AnomalyDetector):
     """Detects high-entropy strings that might be secrets, tokens, or API keys.
 
     Tuned to be strict - only flags actual hashes, tokens, and keys, not normal
     text or email addresses.
     """
+
+    def __init__(self, filepath: str | None = None):
+        """Initialize the detector.
+
+        Args:
+            filepath: Path to file being analyzed (for logging context).
+        """
+        self._filepath = filepath
+        self._detection_count = 0
+        self._detection_types: dict[str, int] = {}
+        logger.debug(f'[high_entropy] Initialized for file: {filepath}')
 
     # Minimum length of high-entropy substring to flag
     MIN_TOKEN_LENGTH = 32
@@ -68,6 +84,22 @@ class HighEntropyDetector(AnomalyDetector):
     def category(self) -> str:
         return 'security'
 
+    @property
+    def detector_description(self) -> str:
+        return 'Detects high-entropy strings that may be secrets, tokens, API keys, or cryptographic hashes'
+
+    @property
+    def severity_min(self) -> float:
+        return 0.5
+
+    @property
+    def severity_max(self) -> float:
+        return 0.85
+
+    @property
+    def examples(self) -> list[str]:
+        return ['api_key=...', 'Bearer token', 'AWS AKIA...', 'JWT eyJ...', 'SHA256 hash', 'Private key']
+
     def _calculate_entropy(self, s: str) -> float:
         """Calculate Shannon entropy of a string."""
         if not s:
@@ -102,6 +134,12 @@ class HighEntropyDetector(AnomalyDetector):
         for pattern in self.SECRET_CONTEXT_PATTERNS:
             match = pattern.search(line)
             if match:
+                self._detection_count += 1
+                self._detection_types['secret_context'] = self._detection_types.get('secret_context', 0) + 1
+                logger.debug(
+                    f'[high_entropy] {self._filepath}: Detected secret in context (severity=0.85) '
+                    f'at line {ctx.line_number}: {line.rstrip()[:80]}{"..." if len(line) > 80 else ""}'
+                )
                 return 0.85  # High severity for secrets in context
 
         # Check for high-entropy strings without context
@@ -116,10 +154,21 @@ class HighEntropyDetector(AnomalyDetector):
 
                 # JWT tokens are always flagged (very specific pattern)
                 if token.startswith('eyJ') and '.' in token:
+                    self._detection_count += 1
+                    self._detection_types['jwt'] = self._detection_types.get('jwt', 0) + 1
+                    logger.debug(
+                        f'[high_entropy] {self._filepath}: Detected JWT token (severity=0.7) at line {ctx.line_number}'
+                    )
                     return 0.7
 
                 # AWS keys are always flagged (very specific pattern)
                 if token.startswith('AKIA'):
+                    self._detection_count += 1
+                    self._detection_types['aws_key'] = self._detection_types.get('aws_key', 0) + 1
+                    logger.debug(
+                        f'[high_entropy] {self._filepath}: Detected AWS access key (severity=0.85) '
+                        f'at line {ctx.line_number}'
+                    )
                     return 0.85
 
                 # For hex hashes, check length and entropy
@@ -129,9 +178,21 @@ class HighEntropyDetector(AnomalyDetector):
                     # Use lower threshold for hex strings (they have max ~4 bits entropy)
                     if self._is_hex_string(token):
                         if entropy >= self.HEX_ENTROPY_THRESHOLD:
+                            self._detection_count += 1
+                            self._detection_types['hex_hash'] = self._detection_types.get('hex_hash', 0) + 1
+                            logger.debug(
+                                f'[high_entropy] {self._filepath}: Detected hex hash (len={len(token)}, '
+                                f'entropy={entropy:.2f}, severity=0.6) at line {ctx.line_number}'
+                            )
                             return 0.6  # Medium-high for hex hashes
                     else:
                         if entropy >= self.ENTROPY_THRESHOLD:
+                            self._detection_count += 1
+                            self._detection_types['high_entropy'] = self._detection_types.get('high_entropy', 0) + 1
+                            logger.debug(
+                                f'[high_entropy] {self._filepath}: Detected high-entropy string (len={len(token)}, '
+                                f'entropy={entropy:.2f}, severity=0.5) at line {ctx.line_number}'
+                            )
                             return 0.5  # Medium for other high-entropy strings
 
         return None

@@ -1,12 +1,28 @@
 """Traceback detector for stack traces from multiple languages."""
 
+import logging
 import re
 
-from .base import AnomalyDetector, LineContext
+from .base import AnomalyDetector, LineContext, register_detector
 
 
+logger = logging.getLogger(__name__)
+
+
+@register_detector
 class TracebackDetector(AnomalyDetector):
     """Detects stack traces from Python, Java, JavaScript, Go, and Rust."""
+
+    def __init__(self, filepath: str | None = None):
+        """Initialize the detector.
+
+        Args:
+            filepath: Path to file being analyzed (for logging context).
+        """
+        self._filepath = filepath
+        self._detection_count = 0
+        self._merge_count = 0
+        logger.debug(f'[traceback] Initialized for file: {filepath}')
 
     # Patterns for detecting start of tracebacks
     TRACEBACK_START_PATTERNS = {
@@ -55,13 +71,39 @@ class TracebackDetector(AnomalyDetector):
     def category(self) -> str:
         return 'traceback'
 
+    @property
+    def detector_description(self) -> str:
+        return 'Detects stack traces and exception backtraces from Python, Java, JavaScript, Go, and Rust'
+
+    @property
+    def severity_min(self) -> float:
+        return 0.9
+
+    @property
+    def severity_max(self) -> float:
+        return 0.9
+
+    @property
+    def examples(self) -> list[str]:
+        return [
+            'Traceback (most recent call last):',
+            'Exception in thread',
+            'panic:',
+            "thread 'main' panicked at",
+        ]
+
     def check_line(self, ctx: LineContext) -> float | None:
         line = ctx.line.rstrip()
 
         # Check for traceback start patterns
-        for lang_patterns in self.TRACEBACK_START_PATTERNS.values():
+        for lang, lang_patterns in self.TRACEBACK_START_PATTERNS.items():
             for pattern in lang_patterns:
                 if pattern.match(line):
+                    self._detection_count += 1
+                    logger.debug(
+                        f'[traceback] {self._filepath}: Detected {lang} traceback at line {ctx.line_number}: '
+                        f'{line[:80]}{"..." if len(line) > 80 else ""}'
+                    )
                     return 0.9
 
         return None
@@ -72,12 +114,22 @@ class TracebackDetector(AnomalyDetector):
         # Check for continuation patterns
         for pattern in self.TRACEBACK_CONTINUATION_PATTERNS:
             if pattern.match(line):
+                self._merge_count += 1
+                logger.debug(
+                    f'[traceback] {self._filepath}: Merging continuation at line {ctx.line_number}: '
+                    f'{line[:60]}{"..." if len(line) > 60 else ""}'
+                )
                 return True
 
         # Also merge if previous was a traceback and this looks like an error message
         if prev_severity >= 0.9:
             # Check if this is an exception message (starts with exception name)
             if re.match(r'^\w+(Error|Exception):', line):
+                self._merge_count += 1
+                logger.debug(
+                    f'[traceback] {self._filepath}: Merging exception message at line {ctx.line_number}: '
+                    f'{line[:60]}{"..." if len(line) > 60 else ""}'
+                )
                 return True
 
         return False
