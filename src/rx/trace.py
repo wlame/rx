@@ -640,7 +640,7 @@ def process_seekable_zstd_file(
 
     logger.info(
         f'[SEEKABLE] File has {index.frame_count} frames, '
-        f'{index.total_lines:,} lines, {index.decompressed_size_bytes:,} bytes decompressed'
+        f'{index.line_count:,} lines, {index.decompressed_size_bytes:,} bytes decompressed'
     )
 
     # Create enhanced frame info list with line mapping

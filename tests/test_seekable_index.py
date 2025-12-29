@@ -16,9 +16,8 @@ except ImportError:
 # Check if either t2sz or zstandard is available for compression
 CAN_CREATE_SEEKABLE = check_t2sz_available() or ZSTANDARD_AVAILABLE
 
+from rx.models import FileType, FrameLineInfo, UnifiedFileIndex
 from rx.seekable_index import (
-    FrameLineInfo,
-    SeekableIndex,
     build_index,
     delete_index,
     find_frame_for_line,
@@ -35,7 +34,7 @@ from rx.unified_index import UNIFIED_INDEX_VERSION
 
 
 class TestFrameLineInfo:
-    """Test FrameLineInfo dataclass."""
+    """Test FrameLineInfo Pydantic model."""
 
     def test_creation(self):
         """Test creating FrameLineInfo object."""
@@ -55,46 +54,50 @@ class TestFrameLineInfo:
         assert info.line_count == 100
 
 
-class TestSeekableIndex:
-    """Test SeekableIndex dataclass."""
+class TestUnifiedFileIndexForSeekableZstd:
+    """Test UnifiedFileIndex usage for seekable zstd files."""
 
-    def test_to_dict(self):
-        """Test converting SeekableIndex to dictionary."""
-        index = SeekableIndex(
-            version=1,
-            source_zst_path='/test/file.zst',
-            source_zst_modified_at='2025-01-01T00:00:00',
-            source_zst_size_bytes=1000,
+    def test_creation(self):
+        """Test creating UnifiedFileIndex for seekable zstd."""
+        index = UnifiedFileIndex(
+            version=2,
+            source_path='/test/file.zst',
+            source_modified_at='2025-01-01T00:00:00',
+            source_size_bytes=1000,
+            file_type=FileType.SEEKABLE_ZSTD,
+            compression_format='zstd',
+            is_text=True,
             decompressed_size_bytes=5000,
-            total_lines=100,
+            line_count=100,
             frame_count=2,
             frame_size_target=4096,
             created_at='2025-01-01T00:00:00',
         )
-        d = index.to_dict()
-        assert d['version'] == 1
-        assert d['source_zst_path'] == '/test/file.zst'
-        assert d['total_lines'] == 100
+        assert index.version == 2
+        assert index.source_path == '/test/file.zst'
+        assert index.line_count == 100
+        assert index.file_type == FileType.SEEKABLE_ZSTD
 
-    def test_from_dict(self):
-        """Test creating SeekableIndex from dictionary."""
-        d = {
-            'version': 1,
-            'source_zst_path': '/test/file.zst',
-            'source_zst_modified_at': '2025-01-01T00:00:00',
-            'source_zst_size_bytes': 1000,
-            'decompressed_size_bytes': 5000,
-            'total_lines': 100,
-            'frame_count': 2,
-            'frame_size_target': 4096,
-            'frames': [],
-            'line_index': [],
-            'created_at': '2025-01-01T00:00:00',
-        }
-        index = SeekableIndex.from_dict(d)
-        assert index.version == 1
-        assert index.source_zst_path == '/test/file.zst'
-        assert index.total_lines == 100
+    def test_model_dump(self):
+        """Test converting UnifiedFileIndex to dictionary."""
+        index = UnifiedFileIndex(
+            version=2,
+            source_path='/test/file.zst',
+            source_modified_at='2025-01-01T00:00:00',
+            source_size_bytes=1000,
+            file_type=FileType.SEEKABLE_ZSTD,
+            compression_format='zstd',
+            is_text=True,
+            decompressed_size_bytes=5000,
+            line_count=100,
+            frame_count=2,
+            frame_size_target=4096,
+            created_at='2025-01-01T00:00:00',
+        )
+        d = index.model_dump()
+        assert d['version'] == 2
+        assert d['source_path'] == '/test/file.zst'
+        assert d['line_count'] == 100
 
 
 class TestIndexPath:
@@ -153,10 +156,11 @@ class TestBuildIndex:
         index = build_index(zst_file)
 
         assert index.version == UNIFIED_INDEX_VERSION
-        assert index.source_zst_path == str(zst_file.resolve())
-        assert index.total_lines == expected_lines
+        assert index.source_path == str(zst_file.resolve())
+        assert index.line_count == expected_lines
         assert len(index.frames) == index.frame_count
         assert index.frame_count > 0
+        assert index.file_type == FileType.SEEKABLE_ZSTD
 
     def test_build_index_frame_line_ranges(self, seekable_zstd_file, tmp_path, monkeypatch):
         """Test that frame line ranges are correct."""
@@ -172,7 +176,7 @@ class TestBuildIndex:
         for i in range(1, len(index.frames)):
             assert index.frames[i].first_line == index.frames[i - 1].last_line + 1
 
-        # Last frame should end at total_lines
+        # Last frame should end at line_count
         assert index.frames[-1].last_line == expected_lines
 
     def test_build_index_invalid_file(self, tmp_path):
@@ -222,13 +226,16 @@ class TestFindFrameForLine:
                 line_count=50,
             ),
         ]
-        return SeekableIndex(
-            version=1,
-            source_zst_path='/test.zst',
-            source_zst_modified_at='2025-01-01',
-            source_zst_size_bytes=300,
+        return UnifiedFileIndex(
+            version=2,
+            source_path='/test.zst',
+            source_modified_at='2025-01-01',
+            source_size_bytes=300,
+            file_type=FileType.SEEKABLE_ZSTD,
+            compression_format='zstd',
+            is_text=True,
             decompressed_size_bytes=3000,
-            total_lines=150,
+            line_count=150,
             frame_count=3,
             frame_size_target=1000,
             frames=frames,
@@ -288,13 +295,16 @@ class TestFindFramesForLines:
                 line_count=50,
             ),
         ]
-        return SeekableIndex(
-            version=1,
-            source_zst_path='/test.zst',
-            source_zst_modified_at='2025-01-01',
-            source_zst_size_bytes=200,
+        return UnifiedFileIndex(
+            version=2,
+            source_path='/test.zst',
+            source_modified_at='2025-01-01',
+            source_size_bytes=200,
+            file_type=FileType.SEEKABLE_ZSTD,
+            compression_format='zstd',
+            is_text=True,
             decompressed_size_bytes=2000,
-            total_lines=100,
+            line_count=100,
             frame_count=2,
             frame_size_target=1000,
             frames=frames,
@@ -354,7 +364,7 @@ class TestIndexValidation:
 
         # Get should return cached index
         index = get_or_build_index(zst_file)
-        assert index.total_lines == original_index.total_lines
+        assert index.line_count == original_index.line_count
 
 
 class TestIndexPersistence:
@@ -374,13 +384,16 @@ class TestIndexPersistence:
                 line_count=50,
             ),
         ]
-        original = SeekableIndex(
-            version=1,
-            source_zst_path='/test.zst',
-            source_zst_modified_at='2025-01-01',
-            source_zst_size_bytes=100,
+        original = UnifiedFileIndex(
+            version=2,
+            source_path='/test.zst',
+            source_modified_at='2025-01-01',
+            source_size_bytes=100,
+            file_type=FileType.SEEKABLE_ZSTD,
+            compression_format='zstd',
+            is_text=True,
             decompressed_size_bytes=1000,
-            total_lines=50,
+            line_count=50,
             frame_count=1,
             frame_size_target=1000,
             frames=frames,
@@ -392,7 +405,7 @@ class TestIndexPersistence:
 
         loaded = load_index(index_path)
         assert loaded is not None
-        assert loaded.total_lines == original.total_lines
+        assert loaded.line_count == original.line_count
         assert loaded.frame_count == original.frame_count
         assert len(loaded.frames) == len(original.frames)
 
@@ -449,9 +462,9 @@ class TestGetIndexInfo:
 
         info = get_index_info(zst_file)
         assert info is not None
-        assert 'total_lines' in info
+        assert 'line_count' in info
         assert 'frame_count' in info
-        assert info['total_lines'] == 100
+        assert info['line_count'] == 100
 
     def test_get_index_info_nonexistent(self, tmp_path):
         """Test getting info for nonexistent index returns None."""

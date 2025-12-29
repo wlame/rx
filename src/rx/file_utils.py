@@ -1000,8 +1000,8 @@ def get_context_from_seekable_zstd(
     lines_by_frame: dict[int, list[int]] = defaultdict(list)
 
     for line_num in line_numbers:
-        if line_num < 1 or line_num > index.total_lines:
-            raise ValueError(f'Line {line_num} is out of bounds. File has {index.total_lines} lines (EOF reached).')
+        if line_num < 1 or (index.line_count and line_num > index.line_count):
+            raise ValueError(f'Line {line_num} is out of bounds. File has {index.line_count} lines (EOF reached).')
 
         # Find which frame contains this line
         frame_idx = find_frame_for_line(index, line_num)
@@ -1054,7 +1054,7 @@ def get_context_from_seekable_zstd(
 
     # Now extract context for each requested line
     for line_num in line_numbers:
-        if line_num < 1 or line_num > index.total_lines:
+        if line_num < 1 or (index.line_count and line_num > index.line_count):
             continue  # Already set to empty above
 
         try:
@@ -1064,7 +1064,7 @@ def get_context_from_seekable_zstd(
 
             # Calculate context window
             start_line = max(1, line_num - before_context)
-            end_line = min(index.total_lines, line_num + after_context)
+            end_line = min(index.line_count or line_num + after_context, line_num + after_context)
 
             context_lines = []
 

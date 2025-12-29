@@ -311,11 +311,9 @@ class TestAnalyzeSeekableZstdIndex:
     def test_analyze_seekable_zstd_with_index_info(self, tmp_path):
         """Test that analyze correctly reads index info from seekable zstd files.
 
-        This is a regression test for the error:
-        'SeekableIndex' object has no attribute 'get'
-
-        The issue was that load_index returns a SeekableIndex dataclass object,
-        but the code was calling .get() on it as if it were a dict.
+        This is a regression test for the error where load_index was returning
+        a dataclass object but code was treating it as a dict. Now resolved
+        by using UnifiedFileIndex Pydantic model throughout.
         """
         import subprocess
 

@@ -8,6 +8,9 @@ Index files are stored in $RX_CACHE_DIR/indexes/ (or ~/.cache/rx/indexes/) and c
 
 The index enables O(1) lookup of which frame contains a given line,
 enabling fast samples extraction without full decompression.
+
+All indexes use UnifiedFileIndex from rx.models for a consistent format
+across all file types (text, compressed, seekable zstd).
 """
 
 import hashlib
@@ -15,13 +18,11 @@ import json
 import logging
 from collections import defaultdict
 from collections.abc import Callable
-from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from rx.models import FrameLineInfo  # Use Pydantic model from models.py
+from rx.models import FileType, FrameLineInfo, UnifiedFileIndex
 from rx.seekable_zstd import (
-    DEFAULT_FRAME_SIZE_BYTES,
     FrameInfo,
     decompress_frame,
     get_seekable_zstd_info,
@@ -55,71 +56,6 @@ def frame_line_info_from_frame(frame: FrameInfo, first_line: int, last_line: int
     )
 
 
-@dataclass
-class SeekableIndex:
-    """Complete index for a seekable zstd file."""
-
-    version: int
-    source_zst_path: str
-    source_zst_modified_at: str
-    source_zst_size_bytes: int
-    decompressed_size_bytes: int
-    total_lines: int
-    frame_count: int
-    frame_size_target: int
-    frames: list[FrameLineInfo] = field(default_factory=list)
-    # Sampled line index: list of (line_number, decompressed_offset, frame_index)
-    line_index: list[tuple[int, int, int]] = field(default_factory=list)
-    created_at: str = ''
-
-    def to_dict(self) -> dict:
-        """Convert to dictionary for JSON serialization.
-
-        Returns a format compatible with UnifiedFileIndex for unified caching.
-        """
-        return {
-            'version': self.version,
-            # UnifiedFileIndex-compatible fields
-            'source_path': self.source_zst_path,
-            'source_modified_at': self.source_zst_modified_at,
-            'source_size_bytes': self.source_zst_size_bytes,
-            'file_type': 'seekable_zstd',
-            'compression_format': 'zstd',
-            'is_text': True,
-            # Seekable zstd specific
-            'decompressed_size_bytes': self.decompressed_size_bytes,
-            'line_count': self.total_lines,
-            'frame_count': self.frame_count,
-            'frame_size_target': self.frame_size_target,
-            'frames': [f.model_dump() for f in self.frames],
-            'line_index': self.line_index,
-            'created_at': self.created_at,
-            # Legacy fields for backward compat with SeekableIndex.from_dict()
-            'source_zst_path': self.source_zst_path,
-            'source_zst_modified_at': self.source_zst_modified_at,
-            'source_zst_size_bytes': self.source_zst_size_bytes,
-            'total_lines': self.total_lines,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> 'SeekableIndex':
-        """Create SeekableIndex from dictionary."""
-        frames = [FrameLineInfo(**f) for f in data.get('frames', [])]
-        return cls(
-            version=data.get('version', UNIFIED_INDEX_VERSION),
-            source_zst_path=data.get('source_zst_path', ''),
-            source_zst_modified_at=data.get('source_zst_modified_at', ''),
-            source_zst_size_bytes=data.get('source_zst_size_bytes', 0),
-            decompressed_size_bytes=data.get('decompressed_size_bytes', 0),
-            total_lines=data.get('total_lines', 0),
-            frame_count=data.get('frame_count', 0),
-            frame_size_target=data.get('frame_size_target', DEFAULT_FRAME_SIZE_BYTES),
-            frames=frames,
-            line_index=data.get('line_index', []),
-            created_at=data.get('created_at', ''),
-        )
-
-
 def get_index_dir() -> Path:
     """Get the index directory path, creating it if necessary."""
     return get_rx_cache_dir('indexes')
@@ -144,7 +80,7 @@ def get_index_path(zst_path: str | Path) -> Path:
     filename = zst_path.name
     # Sanitize filename to be safe for filesystem
     safe_filename = ''.join(c if c.isalnum() or c in '._-' else '_' for c in filename)
-    # Use unified format: {filename}_{hash}.json (not legacy {hash}_{filename}.idx.json)
+    # Use unified format: {filename}_{hash}.json
     index_filename = f'{safe_filename}_{path_hash}.json'
     return get_index_dir() / index_filename
 
@@ -187,11 +123,11 @@ def is_index_valid(zst_path: str | Path) -> bool:
         zst_stat = zst_path.stat()
         zst_mtime = datetime.fromtimestamp(zst_stat.st_mtime).isoformat()
 
-        if index.source_zst_modified_at != zst_mtime:
+        if index.source_modified_at != zst_mtime:
             logger.debug(f'Index invalid: mtime mismatch for {zst_path}')
             return False
 
-        if index.source_zst_size_bytes != zst_stat.st_size:
+        if index.source_size_bytes != zst_stat.st_size:
             logger.debug(f'Index invalid: size mismatch for {zst_path}')
             return False
 
@@ -202,29 +138,29 @@ def is_index_valid(zst_path: str | Path) -> bool:
         return False
 
 
-def load_index(index_path: Path | str) -> SeekableIndex | None:
+def load_index(index_path: Path | str) -> UnifiedFileIndex | None:
     """Load an index file from disk.
 
     Args:
         index_path: Path to the index file
 
     Returns:
-        SeekableIndex object, or None if loading fails
+        UnifiedFileIndex object, or None if loading fails
     """
     try:
         with open(index_path, encoding='utf-8') as f:
             data = json.load(f)
-        return SeekableIndex.from_dict(data)
-    except (OSError, json.JSONDecodeError) as e:
+        return UnifiedFileIndex(**data)
+    except (OSError, json.JSONDecodeError, ValueError) as e:
         logger.debug(f'Failed to load index {index_path}: {e}')
         return None
 
 
-def save_index(index: SeekableIndex, index_path: Path | str) -> bool:
+def save_index(index: UnifiedFileIndex, index_path: Path | str) -> bool:
     """Save an index to disk.
 
     Args:
-        index: SeekableIndex object
+        index: UnifiedFileIndex object
         index_path: Path to save the index
 
     Returns:
@@ -235,7 +171,7 @@ def save_index(index: SeekableIndex, index_path: Path | str) -> bool:
         index_path.parent.mkdir(parents=True, exist_ok=True)
 
         with open(index_path, 'w', encoding='utf-8') as f:
-            json.dump(index.to_dict(), f, indent=2)
+            json.dump(index.model_dump(mode='json'), f, indent=2)
 
         logger.info(f'Seekable index saved to {index_path}')
         return True
@@ -245,14 +181,14 @@ def save_index(index: SeekableIndex, index_path: Path | str) -> bool:
         return False
 
 
-def get_index(zst_path: str | Path) -> SeekableIndex | None:
+def get_index(zst_path: str | Path) -> UnifiedFileIndex | None:
     """Get index for a seekable zstd file, loading from cache if valid.
 
     Args:
         zst_path: Path to the seekable zstd file
 
     Returns:
-        SeekableIndex if available and valid, None otherwise
+        UnifiedFileIndex if available and valid, None otherwise
     """
     zst_path = Path(zst_path)
 
@@ -265,7 +201,7 @@ def get_index(zst_path: str | Path) -> SeekableIndex | None:
 def build_index(
     zst_path: str | Path,
     progress_callback: Callable | None = None,
-) -> SeekableIndex:
+) -> UnifiedFileIndex:
     """Build a comprehensive index for a seekable zstd file.
 
     This decompresses each frame to count lines and build the line-to-frame
@@ -276,7 +212,7 @@ def build_index(
         progress_callback: Optional callback(frame_index, total_frames)
 
     Returns:
-        SeekableIndex with complete line mapping
+        UnifiedFileIndex with complete line mapping
 
     Raises:
         ValueError: If file is not a valid seekable zstd
@@ -296,8 +232,8 @@ def build_index(
     zst_mtime = datetime.fromtimestamp(zst_stat.st_mtime).isoformat()
 
     # Build frame line info by decompressing each frame
-    frame_line_infos = []
-    line_index = []
+    frame_line_infos: list[FrameLineInfo] = []
+    line_index: list[list[int]] = []
     current_line = 1
     total_lines = 0
 
@@ -324,7 +260,7 @@ def build_index(
         frame_line_infos.append(frame_line_info_from_frame(frame, first_line, last_line))
 
         # Add sampled line index entries for this frame
-        # Store entry for first line of frame
+        # Store entry for first line of frame (3-element format for seekable zstd)
         line_index.append([first_line, frame.decompressed_offset, frame.index])
 
         # Add intermediate entries at LINE_INDEX_INTERVAL
@@ -347,19 +283,22 @@ def build_index(
     if progress_callback:
         progress_callback(len(frames), len(frames))
 
-    # Create index
-    index = SeekableIndex(
+    # Create UnifiedFileIndex
+    index = UnifiedFileIndex(
         version=UNIFIED_INDEX_VERSION,
-        source_zst_path=str(zst_path.resolve()),
-        source_zst_modified_at=zst_mtime,
-        source_zst_size_bytes=zst_stat.st_size,
+        source_path=str(zst_path.resolve()),
+        source_modified_at=zst_mtime,
+        source_size_bytes=zst_stat.st_size,
+        created_at=datetime.now().isoformat(),
+        file_type=FileType.SEEKABLE_ZSTD,
+        compression_format='zstd',
+        is_text=True,
         decompressed_size_bytes=zst_info.decompressed_size,
-        total_lines=total_lines,
+        line_count=total_lines,
         frame_count=len(frames),
         frame_size_target=zst_info.frame_size_target,
         frames=frame_line_infos,
         line_index=line_index,
-        created_at=datetime.now().isoformat(),
     )
 
     # Save index
@@ -373,7 +312,7 @@ def build_index(
 def get_or_build_index(
     zst_path: str | Path,
     progress_callback: Callable | None = None,
-) -> SeekableIndex:
+) -> UnifiedFileIndex:
     """Get existing index or build a new one.
 
     Args:
@@ -381,7 +320,7 @@ def get_or_build_index(
         progress_callback: Optional callback for build progress
 
     Returns:
-        SeekableIndex (from cache or newly built)
+        UnifiedFileIndex (from cache or newly built)
     """
     zst_path = Path(zst_path)
 
@@ -395,21 +334,25 @@ def get_or_build_index(
     return build_index(zst_path, progress_callback)
 
 
-def find_frame_for_line(index: SeekableIndex, line_number: int) -> int:
+def find_frame_for_line(index: UnifiedFileIndex, line_number: int) -> int:
     """Find which frame contains the given line number.
 
     Args:
-        index: SeekableIndex object
+        index: UnifiedFileIndex object
         line_number: 1-based line number
 
     Returns:
         Frame index (0-based)
 
     Raises:
-        ValueError: If line_number is out of range
+        ValueError: If line_number is out of range or index has no frames
     """
-    if line_number < 1 or line_number > index.total_lines:
-        raise ValueError(f'Line number {line_number} out of range (1-{index.total_lines})')
+    line_count = index.line_count or 0
+    if line_number < 1 or line_number > line_count:
+        raise ValueError(f'Line number {line_number} out of range (1-{line_count})')
+
+    if not index.frames:
+        raise ValueError('Index has no frame information')
 
     # Binary search through frames
     for frame in index.frames:
@@ -420,31 +363,32 @@ def find_frame_for_line(index: SeekableIndex, line_number: int) -> int:
     raise ValueError(f'Line {line_number} not found in any frame')
 
 
-def find_frames_for_lines(index: SeekableIndex, line_numbers: list[int]) -> dict[int, list[int]]:
+def find_frames_for_lines(index: UnifiedFileIndex, line_numbers: list[int]) -> dict[int, list[int]]:
     """Find frames for multiple line numbers.
 
     Args:
-        index: SeekableIndex object
+        index: UnifiedFileIndex object
         line_numbers: List of 1-based line numbers
 
     Returns:
         Dictionary mapping frame_index to list of line numbers in that frame
     """
-    frames_to_lines = defaultdict(list)
+    frames_to_lines: dict[int, list[int]] = defaultdict(list)
+    line_count = index.line_count or 0
 
     for line_num in line_numbers:
-        if 1 <= line_num <= index.total_lines:
+        if 1 <= line_num <= line_count:
             frame_idx = find_frame_for_line(index, line_num)
             frames_to_lines[frame_idx].append(line_num)
 
     return dict(frames_to_lines)
 
 
-def find_frames_for_byte_range(index: SeekableIndex, start_offset: int, end_offset: int) -> list[int]:
+def find_frames_for_byte_range(index: UnifiedFileIndex, start_offset: int, end_offset: int) -> list[int]:
     """Find frames that cover a decompressed byte range.
 
     Args:
-        index: SeekableIndex object
+        index: UnifiedFileIndex object
         start_offset: Start offset in decompressed stream
         end_offset: End offset in decompressed stream
 
@@ -452,6 +396,9 @@ def find_frames_for_byte_range(index: SeekableIndex, start_offset: int, end_offs
         List of frame indices that overlap with the range
     """
     result = []
+
+    if not index.frames:
+        return result
 
     for frame in index.frames:
         frame_start = frame.decompressed_offset
@@ -464,21 +411,25 @@ def find_frames_for_byte_range(index: SeekableIndex, start_offset: int, end_offs
     return result
 
 
-def get_frame_info(index: SeekableIndex, frame_index: int) -> FrameLineInfo:
+def get_frame_info(index: UnifiedFileIndex, frame_index: int) -> FrameLineInfo:
     """Get frame info by index.
 
     Args:
-        index: SeekableIndex object
+        index: UnifiedFileIndex object
         frame_index: 0-based frame index
 
     Returns:
         FrameLineInfo for the specified frame
 
     Raises:
-        ValueError: If frame_index is out of range
+        ValueError: If frame_index is out of range or index has no frames
     """
-    if frame_index < 0 or frame_index >= index.frame_count:
-        raise ValueError(f'Frame index {frame_index} out of range (0-{index.frame_count - 1})')
+    frame_count = index.frame_count or 0
+    if not index.frames:
+        raise ValueError('Index has no frame information')
+
+    if frame_index < 0 or frame_index >= frame_count:
+        raise ValueError(f'Frame index {frame_index} out of range (0-{frame_count - 1})')
 
     return index.frames[frame_index]
 
@@ -523,11 +474,11 @@ def get_index_info(zst_path: str | Path) -> dict | None:
 
     return {
         'index_path': str(index_path),
-        'source_zst_path': index.source_zst_path,
-        'source_zst_size_bytes': index.source_zst_size_bytes,
-        'source_zst_modified_at': index.source_zst_modified_at,
+        'source_path': index.source_path,
+        'source_size_bytes': index.source_size_bytes,
+        'source_modified_at': index.source_modified_at,
         'decompressed_size_bytes': index.decompressed_size_bytes,
-        'total_lines': index.total_lines,
+        'line_count': index.line_count,
         'frame_count': index.frame_count,
         'frame_size_target': index.frame_size_target,
         'created_at': index.created_at,

@@ -145,10 +145,10 @@ class TestSeekableZstdIndexVersion:
         assert index.version == UNIFIED_INDEX_VERSION
         assert index.version == 2
 
-    def test_seekable_index_to_dict_has_version_2(self, temp_seekable_zstd_file):
-        """Test that SeekableIndex.to_dict() includes version 2."""
+    def test_seekable_index_model_dump_has_version_2(self, temp_seekable_zstd_file):
+        """Test that UnifiedFileIndex.model_dump() includes version 2."""
         index = build_seekable_index(temp_seekable_zstd_file)
-        index_dict = index.to_dict()
+        index_dict = index.model_dump()
 
         assert index_dict['version'] == UNIFIED_INDEX_VERSION
         assert index_dict['version'] == 2

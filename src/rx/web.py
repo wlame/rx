@@ -1569,7 +1569,7 @@ async def run_compress_task(
             )
             if index_result:
                 index_built = True
-                total_lines = index_result.total_lines
+                total_lines = index_result.line_count
 
         # Build result dictionary
         task_result = {

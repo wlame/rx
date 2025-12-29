@@ -18,7 +18,7 @@ from rx import seekable_index, seekable_zstd
 from rx.analyze import default_detectors
 from rx.compression import detect_compression, is_compound_archive, is_compressed
 from rx.file_utils import is_text_file
-from rx.models import AnomalyRangeResult, FileType, FrameLineInfo, UnifiedFileIndex
+from rx.models import AnomalyRangeResult, FileType, UnifiedFileIndex
 
 
 def is_indexable_file(filepath: str) -> bool:
@@ -375,30 +375,18 @@ class FileIndexer:
         idx.compression_format = 'zstd'
 
         try:
-            # Use existing seekable_index module
+            # Use existing seekable_index module (now returns UnifiedFileIndex)
             szst_idx = seekable_index.get_or_build_index(filepath)
             if szst_idx:
                 idx.line_index = szst_idx.line_index
                 idx.frame_count = szst_idx.frame_count
                 idx.frame_size_target = szst_idx.frame_size_target
                 idx.decompressed_size_bytes = szst_idx.decompressed_size_bytes
-                idx.line_count = szst_idx.total_lines
+                idx.line_count = szst_idx.line_count
 
-                # Convert frames
+                # Copy frames directly (already FrameLineInfo from UnifiedFileIndex)
                 if szst_idx.frames:
-                    idx.frames = [
-                        FrameLineInfo(
-                            index=f.index,
-                            compressed_offset=f.compressed_offset,
-                            compressed_size=f.compressed_size,
-                            decompressed_offset=f.decompressed_offset,
-                            decompressed_size=f.decompressed_size,
-                            first_line=f.first_line,
-                            last_line=f.last_line,
-                            line_count=f.line_count,
-                        )
-                        for f in szst_idx.frames
-                    ]
+                    idx.frames = szst_idx.frames
 
                 if idx.decompressed_size_bytes and idx.source_size_bytes:
                     idx.compression_ratio = idx.decompressed_size_bytes / idx.source_size_bytes
