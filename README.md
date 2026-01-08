@@ -96,7 +96,7 @@ rx "error.*" /var/log/
 # Show context lines
 rx "error" /var/log/app.log --samples --context=3
 
-# Search piped input (like grep)
+# Search piped input. Not effective due to single-threaded approach. Use rg directly for piping scenarios.
 cat /var/log/app.log | rx "error"
 docker logs mycontainer | rx "error"
 
