@@ -101,7 +101,7 @@ cat /var/log/app.log | rx "error"
 docker logs mycontainer | rx "error"
 
 # Index and analyze file metadata
-rx index /var/log/app.log --analyze
+rx index --analyze /var/log/app.log
 
 # Check regex complexity
 rx check "(a+)+"

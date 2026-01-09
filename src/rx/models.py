@@ -777,6 +777,13 @@ class TraceResponse(BaseModel):
     before_context: int | None = Field(None, example=3, description='Lines shown before matches')
     after_context: int | None = Field(None, example=3, description='Lines shown after matches')
 
+    # CLI equivalent command
+    cli_command: str | None = Field(
+        None,
+        description='Equivalent CLI command to reproduce this API call',
+        example='rx -e error /var/log/app.log --max-results=100',
+    )
+
     def to_cli(self, colorize: bool = False) -> str:
         """Format response for CLI output (human-readable, uses values instead of IDs)"""
         # ANSI color codes
@@ -1201,6 +1208,13 @@ class ComplexityResponse(BaseModel):
     warnings: list[str] = Field(default_factory=list, description='Legacy warnings list')
     details: ComplexityDetails = Field(default_factory=ComplexityDetails)
 
+    # CLI equivalent command
+    cli_command: str | None = Field(
+        None,
+        description='Equivalent CLI command to reproduce this API call',
+        example="rx check '(a+)+'",
+    )
+
     def to_cli(self, colorize: bool = False) -> str:
         """Format complexity response for CLI output with detailed issue breakdown"""
         # ANSI color codes
@@ -1363,6 +1377,13 @@ class SamplesResponse(BaseModel):
     is_compressed: bool = Field(default=False, description='Whether the source file is compressed')
     compression_format: str | None = Field(
         default=None, example='gzip', description='Compression format if file is compressed'
+    )
+
+    # CLI equivalent command
+    cli_command: str | None = Field(
+        None,
+        description='Equivalent CLI command to reproduce this API call',
+        example='rx samples /var/log/app.log -l 100 -l 200 -c 3',
     )
 
     def to_cli(self, colorize: bool = False, regex: str = None) -> str:

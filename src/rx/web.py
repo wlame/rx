@@ -83,6 +83,7 @@ from rx.unified_index import (
     load_index,
 )
 from rx.utils import NEWLINE_SYMBOL, get_rx_cache_base
+from rx.cli_command_builder import add_cli_command
 
 
 # Replace the noop prometheus in file_utils module with real one
@@ -600,7 +601,15 @@ async def trace(
         max_results=max_results,  # Include max_results in response
     )
 
-    return response
+    # Add CLI command equivalent
+    response_dict = response.model_dump()
+    add_cli_command(response_dict, "trace", {
+        "path": path,
+        "regexp": regexp,
+        "max_results": max_results,
+    })
+
+    return response_dict
 
 
 @app.get(
@@ -654,6 +663,9 @@ async def complexity(
         # Record metrics
         prom.record_complexity_request(duration=duration, score=result['score'], level=result['level'])
         prom.record_http_response('GET', '/v1/complexity', 200)
+
+        # Add CLI command equivalent
+        add_cli_command(result, "complexity", {"regex": regex})
 
         return result
     except Exception as e:
@@ -800,6 +812,9 @@ async def get_index(
 
         # Build response with all index data (same schema as CLI --json)
         response = _unified_index_to_dict(idx)
+
+        # Add CLI command equivalent
+        add_cli_command(response, "index_get", {"path": path})
 
         prom.record_http_response('GET', '/v1/index', 200)
         return response
@@ -1284,7 +1299,7 @@ async def samples(
                 )
                 prom.record_http_response('GET', '/v1/samples', 200)
 
-                return {
+                response = {
                     'path': path,
                     'offsets': {},
                     'lines': line_mapping,
@@ -1294,6 +1309,15 @@ async def samples(
                     'is_compressed': True,
                     'compression_format': compression_format.value,
                 }
+                # Add CLI command equivalent
+                add_cli_command(response, "samples", {
+                    "path": path,
+                    "lines": lines,
+                    "context": context,
+                    "before_context": before_context,
+                    "after_context": after_context,
+                })
+                return response
 
             # Non-seekable compressed files (gzip, xz, bz2)
             # Load index from unified cache (or build via FileIndexer if needed)
@@ -1345,7 +1369,7 @@ async def samples(
             )
             prom.record_http_response('GET', '/v1/samples', 200)
 
-            return {
+            response = {
                 'path': path,
                 'offsets': {},
                 'lines': line_mapping,
@@ -1355,6 +1379,15 @@ async def samples(
                 'is_compressed': True,
                 'compression_format': compression_format.value,
             }
+            # Add CLI command equivalent
+            add_cli_command(response, "samples", {
+                "path": path,
+                "lines": lines,
+                "context": context,
+                "before_context": before_context,
+                "after_context": after_context,
+            })
+            return response
 
         # Regular file handling
         # Load unified index once for mapping calculations
@@ -1472,7 +1505,7 @@ async def samples(
         )
         prom.record_http_response('GET', '/v1/samples', 200)
 
-        return {
+        response = {
             'path': path,
             'offsets': offset_mapping,
             'lines': line_mapping,
@@ -1482,6 +1515,16 @@ async def samples(
             'is_compressed': False,
             'compression_format': None,
         }
+        # Add CLI command equivalent
+        add_cli_command(response, "samples", {
+            "path": path,
+            "offsets": offsets,
+            "lines": lines,
+            "context": context,
+            "before_context": before_context,
+            "after_context": after_context,
+        })
+        return response
     except ValueError as e:
         prom.record_error('invalid_context')
         num_items = len(parsed_values)
@@ -1585,6 +1628,14 @@ async def run_compress_task(
             'time_seconds': elapsed,
         }
 
+        # Add CLI command equivalent
+        add_cli_command(task_result, "compress", {
+            "input_path": normalized_path,
+            "output_path": request.output_path,
+            "frame_size": request.frame_size,
+            "compression_level": request.compression_level,
+        })
+
         await task_manager.update_task(
             task_id,
             status=TaskStatus.COMPLETED,
@@ -1642,6 +1693,13 @@ async def run_index_task(
         task_result = _unified_index_to_dict(index_result)
         task_result['success'] = True
         task_result['index_path'] = str(unified_index.get_index_path(normalized_path))
+
+        # Add CLI command equivalent
+        add_cli_command(task_result, "index_post", {
+            "path": normalized_path,
+            "force": request.force,
+            "analyze": request.analyze,
+        })
 
         await task_manager.update_task(
             task_id,
